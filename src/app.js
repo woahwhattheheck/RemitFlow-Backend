@@ -16,6 +16,7 @@ const maintenanceMode = require('./middleware/maintenanceMode');
 const jsonError = require('./middleware/jsonError');
 const notFound = require('./middleware/notFound');
 const errorHandler = require('./middleware/errorHandler');
+const { resolveClientIp } = require('./utils/clientIdentity');
 
 /**
  * Build and configure the Express application.
@@ -25,6 +26,12 @@ const errorHandler = require('./middleware/errorHandler');
  */
 function createApp() {
   const app = express();
+
+  // Only honour X-Forwarded-* when explicitly configured. Blind trust lets
+  // clients rotate forged IPs and evade the global abuse budget.
+  if (config.trustProxy) {
+    app.set('trust proxy', 1);
+  }
 
   // Core middleware.
   app.use(securityHeaders);
@@ -46,8 +53,20 @@ function createApp() {
   }
   app.use(requestLogger);
 
-  // Basic abuse protection on the API surface.
-  app.use('/api', rateLimit(config.rateLimit));
+  // Basic abuse protection on the API surface (IP-keyed, bounded table).
+  app.use(
+    '/api',
+    rateLimit({
+      name: 'global',
+      windowMs: config.rateLimit.windowMs,
+      max: config.rateLimit.max,
+      maxKeys: config.rateLimit.maxKeys,
+      trustProxy: config.trustProxy,
+      keyGenerator(req) {
+        return resolveClientIp(req, { trustProxy: config.trustProxy });
+      },
+    })
+  );
 
   // Block all non-health API traffic while maintenance mode is active.
   app.use(maintenanceMode);
