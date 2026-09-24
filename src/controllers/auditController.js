@@ -2,6 +2,7 @@
 
 const auditService = require('../services/auditService');
 const { buildHistoryPage } = require('../utils/historyPage');
+const { authFromRequest } = require('../utils/authz');
 
 /**
  * Audit log controllers.
@@ -20,14 +21,15 @@ function listAuditEntries(req, res) {
     : String(req.query.resourceId);
 
   const filters = { resourceId };
+  const auth = authFromRequest(req);
 
   const { items, envelope } = buildHistoryPage({
     req,
     collection: 'audit',
     filters,
     defaultOrder: 'desc',
-    query: (args) => auditService.queryEntries({ resourceId, ...args }),
-    countTotal: () => auditService.countEntries(resourceId),
+    query: (args) => auditService.queryEntries({ resourceId, ...args, auth }),
+    countTotal: () => auditService.countEntries(resourceId, auth),
     resolvePosition: (seq) => auditService.positionKeyAt(seq, resourceId),
   });
 

@@ -79,9 +79,16 @@ const config = {
     }
     // Default tokens for demo purposes
     return {
-      'test-token-admin': ['transfers:read', 'transfers:write', 'users:read', 'users:write', 'audit:read'],
+      'test-token-admin': [
+        'transfers:read',
+        'transfers:write',
+        'users:read',
+        'users:write',
+        'audit:read',
+        'admin:read',
+      ],
       'test-token-readonly': ['transfers:read', 'users:read', 'audit:read'],
-      'test-token-transfers': ['transfers:read', 'transfers:write']
+      'test-token-transfers': ['transfers:read', 'transfers:write'],
     };
   })(),
 };

@@ -4,6 +4,7 @@ const { store } = require('../store');
 const { prefixedId } = require('../utils/ids');
 const ApiError = require('../utils/ApiError');
 const auditService = require('./auditService');
+const { SCOPES, assertScopes } = require('../utils/authz');
 
 /**
  * User management backed by the in-memory store.
@@ -13,7 +14,8 @@ const auditService = require('./auditService');
  * Return all users.
  * @returns {Array<object>}
  */
-function listUsers() {
+function listUsers(auth) {
+  assertScopes(auth, SCOPES.USERS_READ);
   return Array.from(store.users.values());
 }
 
@@ -31,10 +33,11 @@ function findUser(id) {
  * @param {string} id
  * @returns {object}
  */
-function getUserOrThrow(id) {
+function getUserOrThrow(id, auth) {
+  assertScopes(auth, SCOPES.USERS_READ);
   const user = findUser(id);
   if (!user) {
-    throw ApiError.notFound(`User not found: ${id}`);
+    throw ApiError.notFound('User not found');
   }
   return user;
 }
@@ -45,7 +48,8 @@ function getUserOrThrow(id) {
  * @param {string} [requestId] - optional correlation id for audit logging
  * @returns {object}
  */
-function createUser(data, requestId) {
+function createUser(data, requestId, auth) {
+  assertScopes(auth, SCOPES.USERS_WRITE);
   const user = {
     id: prefixedId('usr'),
     name: data.name,

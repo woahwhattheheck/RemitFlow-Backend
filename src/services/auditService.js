@@ -3,6 +3,7 @@
 const { newId } = require('../utils/ids');
 const { OrderedIndex } = require('../utils/orderedIndex');
 const config = require('../config');
+const { SCOPES, assertScopes } = require('../utils/authz');
 
 /**
  * Audit log service.
@@ -69,7 +70,8 @@ function addEntry({ action, resourceId, payload = {}, requestId } = {}) {
  * Return all audit entries, newest first.
  * @returns {Array<object>}
  */
-function getEntries() {
+function getEntries(auth) {
+  assertScopes(auth, SCOPES.AUDIT_READ);
   return auditIndex.records.map((record) => record.item).reverse();
 }
 
@@ -109,7 +111,9 @@ function queryEntries({
   afterSeq = null,
   skip = 0,
   maxScan = config.pagination.maxScan,
+  auth,
 } = {}) {
+  assertScopes(auth, SCOPES.AUDIT_READ);
   return auditIndex.scan({
     group: resourceId == null || resourceId === '' ? null : String(resourceId),
     order,
@@ -138,7 +142,8 @@ function positionKeyAt(seq, resourceId) {
  * @param {string} [resourceId]
  * @returns {number}
  */
-function countEntries(resourceId) {
+function countEntries(resourceId, auth) {
+  assertScopes(auth, SCOPES.AUDIT_READ);
   if (resourceId == null || resourceId === '') return auditIndex.size;
   return auditIndex.recordsFor(String(resourceId)).length;
 }

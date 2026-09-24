@@ -63,13 +63,20 @@ Authorization: Bearer <token>
 
 ### Scopes
 
+Canonical catalog: `src/config/scopes.js`. Full route matrix: [`docs/SCOPE_MATRIX.md`](docs/SCOPE_MATRIX.md).
+
 | Scope | Grants access to |
 |-------|-----------------|
 | `transfers:read` | `GET /api/transfers`, `GET /api/transfers/stats`, `GET /api/transfers/:id` |
-| `transfers:write` | `POST /api/transfers`, `POST /api/transfers/:id/claim`, `POST /api/transfers/:id/cancel`, `POST /api/transfers/:id/archive`, `POST /api/transfers/:id/unarchive` |
+| `transfers:write` | `POST /api/transfers`, `POST /api/transfers/bulk`, `POST /api/transfers/:id/claim`, `POST /api/transfers/:id/cancel`, `POST /api/transfers/:id/archive`, `POST /api/transfers/:id/unarchive` |
 | `users:read` | `GET /api/users`, `GET /api/users/:id` |
 | `users:write` | `POST /api/users` |
 | `audit:read` | `GET /api/audit` |
+| `admin:read` | `GET /api/admin/diagnostics` (also granted by the legacy `ADMIN_API_KEY` / `X-Admin-Token`) |
+
+Scopes are enforced at the route **and** again at the service boundary. Missing,
+malformed, and unknown transfer ids share one `404 Transfer not found` response
+so callers cannot enumerate identifiers by status or message shape.
 
 ### Public endpoints (no token required)
 
@@ -90,7 +97,7 @@ for local development only — rotate before deploying):
 
 | Demo token | Scopes |
 |------------|--------|
-| `test-token-admin` | all scopes |
+| `test-token-admin` | all scopes (including `admin:read`) |
 | `test-token-readonly` | `transfers:read`, `users:read`, `audit:read` |
 | `test-token-transfers` | `transfers:read`, `transfers:write` |
 
