@@ -76,10 +76,27 @@ function getPair(from, to) {
   };
 }
 
+
+/**
+ * Lightweight FX probe used by readiness checks.
+ * Confirms the rate table is loaded and returns at least one currency.
+ * @returns {{ ok: true, currencies: number }}
+ */
+function ping() {
+  const rates = listRates();
+  if (!Array.isArray(rates) || rates.length === 0) {
+    const err = new Error('fx rate table empty');
+    err.reasonCode = 'FX_UNAVAILABLE';
+    throw err;
+  }
+  return { ok: true, currencies: rates.length };
+}
+
 module.exports = {
   listRates,
   isSupported,
   getRate,
   convert,
   getPair,
+  ping,
 };
