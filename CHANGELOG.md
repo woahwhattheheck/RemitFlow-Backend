@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+- Centralize amount/currency validation via a shared currency policy (minor units, min/max, unsupported codes) so quote preview matches transfer settlement (#130).
+
 ## Release Process
 
 When preparing a new release:

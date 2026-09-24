@@ -57,7 +57,9 @@ function getRate(from, to) {
  */
 function convert(amount, from, to) {
   const rate = getRate(from, to);
-  return money.round(amount * rate);
+  const currencyPolicy = require('../utils/currencyPolicy');
+  const toCode = currency.normalize(to);
+  return currencyPolicy.roundToCurrency(amount * rate, toCode);
 }
 
 /**
