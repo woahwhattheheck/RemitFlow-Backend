@@ -18,6 +18,14 @@ When preparing a new release:
 
 ### Added
 
+- Resilient FX provider caching with bounded TTL, deterministic primary→fallback
+  provider order, freshness metadata on rates/quotes, quote versioning
+  (`quoteId` / `quoteVersion`), and explicit `reject_stale` / `allow_stale`
+  policies. Synchronous singleflight prevents provider stampedes. Transfer
+  creation binds quote identity (optional client `quoteId`, otherwise a freshly
+  minted quote) so transfer pricing cannot silently drift. Config knobs:
+  `FX_CACHE_TTL_MS`, `FX_STALE_GRACE_MS`, `FX_QUOTE_TTL_MS`,
+  `FX_ALLOW_STALE_TRANSFERS`.
 - Cursor pagination for `GET /api/transfers` and `GET /api/audit`. Pass
   `?cursor=` (with optional `?order=asc|desc`) to page by an indexed position
   instead of a row offset; responses carry a `pageInfo` block with

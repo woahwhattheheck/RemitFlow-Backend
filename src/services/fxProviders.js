@@ -1,0 +1,146 @@
+'use strict';
+
+const { RATES_TO_USD } = require('../config/rates');
+const ApiError = require('../utils/ApiError');
+
+/**
+ * FX provider adapters.
+ *
+ * RemitFlow currently demos against a static rate table. These adapters wrap
+ * that table behind a provider interface so the cache layer can apply TTL,
+ * fallback, freshness, and stampede controls without rewriting callers.
+ *
+ * Providers are intentionally synchronous: the rest of the transfer path is
+ * sync, and stampede coverage re-enters mid-fetch the same way the
+ * idempotency suite does.
+ */
+
+/** @typedef {{ providerId: string, ratesToUsd: Record<string, number>, fetchedAt: number }} FxSnapshot */
+
+/**
+ * Clone the configured rate table so callers cannot mutate the module constant.
+ * @returns {Record<string, number>}
+ */
+function cloneRates() {
+  return { ...RATES_TO_USD };
+}
+
+/**
+ * Primary FX oracle. Throws when forced down (tests / outage simulation).
+ * @param {{ now?: number }} [opts]
+ * @returns {FxSnapshot}
+ */
+function primaryFetch(opts = {}) {
+  if (primaryFetch._down) {
+    throw ApiError.serviceUnavailable('Primary FX provider unavailable');
+  }
+  const now = opts.now != null ? opts.now : Date.now();
+  return {
+    providerId: 'primary',
+    ratesToUsd: cloneRates(),
+    fetchedAt: now,
+  };
+}
+
+/**
+ * Deterministic secondary oracle. Same table, distinct identity, so fallback
+ * is observable without inventing a second price source for the demo.
+ * @param {{ now?: number }} [opts]
+ * @returns {FxSnapshot}
+ */
+function fallbackFetch(opts = {}) {
+  if (fallbackFetch._down) {
+    throw ApiError.serviceUnavailable('Fallback FX provider unavailable');
+  }
+  const now = opts.now != null ? opts.now : Date.now();
+  return {
+    providerId: 'fallback',
+    ratesToUsd: cloneRates(),
+    fetchedAt: now,
+  };
+}
+
+primaryFetch._down = false;
+fallbackFetch._down = false;
+
+/** Ordered registry. First success wins; order is the fallback contract. */
+const DEFAULT_PROVIDERS = [
+  { id: 'primary', fetch: primaryFetch },
+  { id: 'fallback', fetch: fallbackFetch },
+];
+
+let providers = DEFAULT_PROVIDERS.slice();
+
+/**
+ * Replace the provider list (tests). Pass null/undefined to restore defaults.
+ * @param {Array<{ id: string, fetch: Function }>|null|undefined} next
+ */
+function setProviders(next) {
+  providers = next && next.length ? next.slice() : DEFAULT_PROVIDERS.slice();
+}
+
+/** @returns {Array<{ id: string, fetch: Function }>} */
+function listProviders() {
+  return providers.slice();
+}
+
+/**
+ * Walk providers in order until one returns a snapshot.
+ * @param {{ now?: number }} [opts]
+ * @returns {FxSnapshot}
+ * @throws {ApiError} 503 when every provider fails.
+ */
+function fetchWithFallback(opts = {}) {
+  const errors = [];
+  for (const provider of providers) {
+    try {
+      const snapshot = provider.fetch(opts);
+      if (!snapshot || typeof snapshot.ratesToUsd !== 'object') {
+        throw new Error(`Provider ${provider.id} returned an invalid snapshot`);
+      }
+      return {
+        providerId: snapshot.providerId || provider.id,
+        ratesToUsd: { ...snapshot.ratesToUsd },
+        fetchedAt: snapshot.fetchedAt != null ? snapshot.fetchedAt : (opts.now != null ? opts.now : Date.now()),
+      };
+    } catch (err) {
+      errors.push({
+        providerId: provider.id,
+        message: err && err.message ? err.message : String(err),
+      });
+    }
+  }
+
+  throw ApiError.serviceUnavailable('All FX providers failed', {
+    code: 'FX_PROVIDERS_DOWN',
+    attempted: errors,
+  });
+}
+
+/**
+ * Test helpers: force a named provider down or recover it.
+ * @param {'primary'|'fallback'|string} id
+ * @param {boolean} down
+ */
+function setProviderDown(id, down) {
+  if (id === 'primary') primaryFetch._down = Boolean(down);
+  if (id === 'fallback') fallbackFetch._down = Boolean(down);
+}
+
+/** Reset provider health and registry to defaults. */
+function resetProviders() {
+  primaryFetch._down = false;
+  fallbackFetch._down = false;
+  providers = DEFAULT_PROVIDERS.slice();
+}
+
+module.exports = {
+  primaryFetch,
+  fallbackFetch,
+  fetchWithFallback,
+  setProviders,
+  listProviders,
+  setProviderDown,
+  resetProviders,
+  DEFAULT_PROVIDERS,
+};

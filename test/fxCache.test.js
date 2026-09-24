@@ -1,0 +1,360 @@
+'use strict';
+
+const { test, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+
+const { reset } = require('../src/store');
+const config = require('../src/config');
+const fxCacheService = require('../src/services/fxCacheService');
+const fxProviders = require('../src/services/fxProviders');
+const quoteService = require('../src/services/quoteService');
+const transferService = require('../src/services/transferService');
+const rateService = require('../src/services/rateService');
+const ApiError = require('../src/utils/ApiError');
+
+const ORIGINAL_TTL = config.fx.cacheTtlMs;
+const ORIGINAL_GRACE = config.fx.staleGraceMs;
+const ORIGINAL_QUOTE_TTL = config.fx.quoteTtlMs;
+const ORIGINAL_ALLOW_STALE = config.fx.allowStaleForTransfers;
+
+beforeEach(() => {
+  reset();
+  config.fx.cacheTtlMs = 1_000;
+  config.fx.staleGraceMs = 5_000;
+  config.fx.quoteTtlMs = 2_000;
+  config.fx.allowStaleForTransfers = false;
+});
+
+afterEach(() => {
+  config.fx.cacheTtlMs = ORIGINAL_TTL;
+  config.fx.staleGraceMs = ORIGINAL_GRACE;
+  config.fx.quoteTtlMs = ORIGINAL_QUOTE_TTL;
+  config.fx.allowStaleForTransfers = ORIGINAL_ALLOW_STALE;
+  reset();
+});
+
+const PAYLOAD = {
+  senderName: 'Ada',
+  recipientName: 'Bob',
+  amount: 100,
+  from: 'USD',
+  to: 'EUR',
+};
+
+// ---------------------------------------------------------------------------
+// Cache TTL / freshness
+// ---------------------------------------------------------------------------
+
+test('fresh snapshot is served from cache within TTL without re-fetching', () => {
+  const t0 = 1_000_000;
+  const first = fxCacheService.getSnapshot({ now: t0, policy: 'reject_stale' });
+  assert.equal(first.status, 'fresh');
+  assert.equal(first.stale, false);
+  assert.equal(first.cacheHit, false);
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+
+  const second = fxCacheService.getSnapshot({ now: t0 + 500, policy: 'reject_stale' });
+  assert.equal(second.status, 'fresh');
+  assert.equal(second.cacheHit, true);
+  assert.equal(second.providerId, first.providerId);
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+});
+
+test('expiry triggers a refresh and the new snapshot is fresh', () => {
+  const t0 = 2_000_000;
+  fxCacheService.getSnapshot({ now: t0, policy: 'reject_stale' });
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+
+  const after = fxCacheService.getSnapshot({
+    now: t0 + config.fx.cacheTtlMs + 1,
+    policy: 'reject_stale',
+  });
+  assert.equal(after.status, 'fresh');
+  assert.equal(after.cacheHit, false);
+  assert.equal(fxCacheService.getProviderFetchCount(), 2);
+});
+
+// ---------------------------------------------------------------------------
+// Provider failure + deterministic fallback
+// ---------------------------------------------------------------------------
+
+test('primary failure falls back to the secondary provider deterministically', () => {
+  fxProviders.setProviderDown('primary', true);
+  const snapshot = fxCacheService.getSnapshot({ now: 3_000_000, policy: 'reject_stale' });
+  assert.equal(snapshot.providerId, 'fallback');
+  assert.equal(snapshot.status, 'fresh');
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+});
+
+test('all providers down with no cache rejects under reject_stale', () => {
+  fxProviders.setProviderDown('primary', true);
+  fxProviders.setProviderDown('fallback', true);
+  assert.throws(
+    () => fxCacheService.getSnapshot({ now: 4_000_000, policy: 'reject_stale' }),
+    (err) =>
+      err instanceof ApiError &&
+      err.statusCode === 503 &&
+      err.details &&
+      err.details.code === 'FX_PROVIDERS_DOWN'
+  );
+});
+
+test('all providers down serves visibly-stale cache under allow_stale within grace', () => {
+  const t0 = 5_000_000;
+  fxCacheService.getSnapshot({ now: t0, policy: 'reject_stale' });
+  fxProviders.setProviderDown('primary', true);
+  fxProviders.setProviderDown('fallback', true);
+
+  const stale = fxCacheService.getSnapshot({
+    now: t0 + config.fx.cacheTtlMs + 1,
+    policy: 'allow_stale',
+  });
+  assert.equal(stale.stale, true);
+  assert.equal(stale.status, 'stale');
+  assert.equal(stale.source, 'cache-stale-outage');
+  assert.ok(stale.ageMs > config.fx.cacheTtlMs);
+});
+
+test('fallback order is primary-then-fallback (deterministic)', () => {
+  const seen = [];
+  fxProviders.setProviders([
+    {
+      id: 'primary',
+      fetch: () => {
+        seen.push('primary');
+        throw new Error('primary down');
+      },
+    },
+    {
+      id: 'fallback',
+      fetch: ({ now }) => {
+        seen.push('fallback');
+        return {
+          providerId: 'fallback',
+          ratesToUsd: { USD: 1, EUR: 1.08 },
+          fetchedAt: now,
+        };
+      },
+    },
+  ]);
+
+  const snapshot = fxCacheService.getSnapshot({ now: 6_000_000 });
+  assert.deepEqual(seen, ['primary', 'fallback']);
+  assert.equal(snapshot.providerId, 'fallback');
+});
+
+// ---------------------------------------------------------------------------
+// Stampede prevention
+// ---------------------------------------------------------------------------
+
+test('stampede: re-entrant refresh does not start a second provider fetch', () => {
+  let reentrantError = null;
+  let innerCalls = 0;
+
+  fxProviders.setProviders([
+    {
+      id: 'primary',
+      fetch: ({ now }) => {
+        // Re-enter while this fetch is in flight — the original failure mode
+        // where every concurrent miss stampeded the provider.
+        try {
+          fxCacheService.getSnapshot({ now, policy: 'reject_stale' });
+        } catch (err) {
+          reentrantError = err;
+        }
+        innerCalls += 1;
+        return {
+          providerId: 'primary',
+          ratesToUsd: { USD: 1, EUR: 1.08, GBP: 1.27, INR: 0.012 },
+          fetchedAt: now,
+        };
+      },
+    },
+  ]);
+
+  const snapshot = fxCacheService.getSnapshot({ now: 7_000_000, policy: 'reject_stale' });
+  assert.equal(snapshot.providerId, 'primary');
+  // Outer refresh counted once; the re-entrant caller must not have started
+  // another provider invocation (innerCalls stays 1 for the outer fetch body).
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+  assert.equal(innerCalls, 1);
+  assert.ok(reentrantError instanceof ApiError);
+  assert.equal(reentrantError.details.code, 'FX_REFRESH_IN_PROGRESS');
+});
+
+test('stampede under allow_stale returns within-grace cache instead of a second fetch', () => {
+  const t0 = 8_000_000;
+  fxCacheService.seed({
+    fetchedAt: t0,
+    expiresAt: t0 + config.fx.cacheTtlMs,
+    providerId: 'primary',
+  });
+
+  let providerHits = 0;
+  fxProviders.setProviders([
+    {
+      id: 'primary',
+      fetch: ({ now }) => {
+        providerHits += 1;
+        // Re-enter as a stampede during the refresh that expiry triggered.
+        const nested = fxCacheService.getSnapshot({
+          now: t0 + config.fx.cacheTtlMs + 1,
+          policy: 'allow_stale',
+        });
+        assert.equal(nested.stale, true);
+        assert.equal(nested.source, 'cache-stale-inflight');
+        return {
+          providerId: 'primary',
+          ratesToUsd: nested.ratesToUsd,
+          fetchedAt: now,
+        };
+      },
+    },
+  ]);
+
+  const refreshed = fxCacheService.getSnapshot({
+    now: t0 + config.fx.cacheTtlMs + 1,
+    policy: 'allow_stale',
+  });
+  assert.equal(refreshed.status, 'fresh');
+  assert.equal(providerHits, 1);
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+});
+
+// ---------------------------------------------------------------------------
+// Quote versioning, visibility, and transfer binding
+// ---------------------------------------------------------------------------
+
+test('quotes expose identity and freshness metadata', () => {
+  const quote = quoteService.getQuote(100, 'USD', 'EUR');
+  assert.equal(typeof quote.quoteId, 'string');
+  assert.ok(quote.quoteId.startsWith('quote_'));
+  assert.equal(typeof quote.quoteVersion, 'number');
+  assert.equal(quote.stale, false);
+  assert.equal(quote.freshness.status, 'fresh');
+  assert.equal(typeof quote.freshness.providerId, 'string');
+  assert.equal(typeof quote.quoteExpiresAt, 'string');
+});
+
+test('stale quote is visible but cannot be used for transfer pricing', () => {
+  // Use wall-clock time so transfer creation (which reads Date.now) and the
+  // quote TTL share the same clock. Only the FX snapshot is forced stale.
+  const now = Date.now();
+  fxCacheService.seed({
+    fetchedAt: now - config.fx.cacheTtlMs - 1,
+    expiresAt: now - 1,
+    providerId: 'primary',
+  });
+  fxProviders.setProviderDown('primary', true);
+  fxProviders.setProviderDown('fallback', true);
+
+  const quote = quoteService.getQuote(100, 'USD', 'EUR', {
+    now,
+    policy: 'allow_stale',
+  });
+  assert.equal(quote.stale, true);
+  assert.equal(quote.freshness.status, 'stale');
+
+  assert.throws(
+    () => quoteService.assertUsable(quote, { now, policy: 'reject_stale' }),
+    (err) =>
+      err instanceof ApiError &&
+      err.statusCode === 409 &&
+      err.details.code === 'QUOTE_STALE'
+  );
+
+  assert.throws(
+    () =>
+      transferService.createTransfer(
+        { ...PAYLOAD, quoteId: quote.quoteId },
+        'req-stale'
+      ),
+    (err) => err instanceof ApiError && err.details.code === 'QUOTE_STALE'
+  );
+});
+
+test('expired quote cannot be bound to a transfer (regression: stale mistaken for current)', () => {
+  const t0 = 10_000_000;
+  const quote = quoteService.getQuote(100, 'USD', 'EUR', { now: t0 });
+  assert.equal(quote.stale, false);
+
+  assert.throws(
+    () =>
+      quoteService.assertUsable(quote, {
+        now: t0 + config.fx.quoteTtlMs + 1,
+        policy: 'reject_stale',
+      }),
+    (err) =>
+      err instanceof ApiError &&
+      err.details.code === 'QUOTE_EXPIRED'
+  );
+});
+
+test('transfer creation binds quote identity (quoteId + quoteVersion)', () => {
+  const quote = quoteService.getQuote(100, 'USD', 'EUR');
+  const transfer = transferService.createTransfer(
+    { ...PAYLOAD, quoteId: quote.quoteId },
+    'req-bind'
+  );
+
+  assert.equal(transfer.quoteId, quote.quoteId);
+  assert.equal(transfer.quoteVersion, quote.quoteVersion);
+  assert.equal(transfer.rate, quote.rate);
+  assert.equal(transfer.receiveAmount, quote.receiveAmount);
+  assert.equal(transfer.rateProvider, quote.freshness.providerId);
+  assert.equal(transfer.rateStale, false);
+});
+
+test('transfer rejects a quoteId that does not match amount/currencies', () => {
+  const quote = quoteService.getQuote(100, 'USD', 'EUR');
+  assert.throws(
+    () =>
+      transferService.createTransfer(
+        { ...PAYLOAD, amount: 200, quoteId: quote.quoteId },
+        'req-mismatch'
+      ),
+    (err) =>
+      err instanceof ApiError &&
+      err.details.code === 'QUOTE_MISMATCH'
+  );
+});
+
+test('transfer without quoteId still mints and binds a fresh quote (compat)', () => {
+  const transfer = transferService.createTransfer(PAYLOAD, 'req-compat');
+  assert.equal(typeof transfer.quoteId, 'string');
+  assert.equal(typeof transfer.quoteVersion, 'number');
+  assert.equal(transfer.rateStale, false);
+  const stored = quoteService.getQuoteById(transfer.quoteId);
+  assert.equal(stored.sendAmount, transfer.sendAmount);
+});
+
+test('provider outage blocks transfer pricing rather than using silent stale rates', () => {
+  // Regression for the original failure mode: outage must not price transfers
+  // on an expired rate that looks "current" because freshness was invisible.
+  const t0 = 11_000_000;
+  fxCacheService.seed({
+    fetchedAt: t0 - config.fx.cacheTtlMs - 1,
+    expiresAt: t0 - 1,
+    providerId: 'primary',
+  });
+  fxProviders.setProviderDown('primary', true);
+  fxProviders.setProviderDown('fallback', true);
+
+  assert.throws(
+    () => transferService.createTransfer(PAYLOAD, 'req-outage'),
+    (err) =>
+      err instanceof ApiError &&
+      (err.details.code === 'FX_PROVIDERS_DOWN' ||
+        err.details.code === 'QUOTE_STALE' ||
+        err.statusCode === 503)
+  );
+});
+
+test('rate list surfaces freshness so stale data cannot be mistaken for current', () => {
+  const listed = rateService.listRates({ now: 12_000_000 });
+  assert.ok(Array.isArray(listed.rates));
+  assert.ok(listed.rates.length > 0);
+  assert.equal(listed.freshness.stale, false);
+  assert.equal(listed.freshness.status, 'fresh');
+  assert.equal(typeof listed.freshness.fetchedAt, 'string');
+});
