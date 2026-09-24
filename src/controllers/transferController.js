@@ -149,20 +149,61 @@ function cancelTransfer(req, res) {
 }
 
 /**
+ * Read optional optimistic-concurrency token for archive mutations.
+ * Prefers body.expectedUpdatedAt; falls back to a bare If-Match header value.
+ * @param {import('express').Request} req
+ * @returns {string|undefined}
+ */
+function readExpectedUpdatedAt(req) {
+  const fromBody = req.body && req.body.expectedUpdatedAt;
+  if (typeof fromBody === 'string' && fromBody.trim() !== '') {
+    return fromBody.trim();
+  }
+  const ifMatch = req.get('If-Match');
+  if (typeof ifMatch === 'string' && ifMatch.trim() !== '') {
+    return ifMatch.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
+  }
+  return undefined;
+}
+
+/**
+ * Shared options for archive / unarchive mutations.
+ * @param {import('express').Request} req
+ * @returns {object}
+ */
+function archiveMutationOptions(req) {
+  const body = req.body || {};
+  return {
+    requestId: req.id,
+    actor: req.token || null,
+    reason: body.reason,
+    expectedUpdatedAt: readExpectedUpdatedAt(req),
+  };
+}
+
+/**
  * POST /api/transfers/:id/archive
  * Archive a transfer, hiding it from default list results.
+ * Body may include `reason` and `expectedUpdatedAt` (optimistic concurrency).
  */
 function archiveTransfer(req, res) {
-  const transfer = transferService.archiveTransfer(req.params.id);
+  const transfer = transferService.archiveTransfer(
+    req.params.id,
+    archiveMutationOptions(req)
+  );
   res.json(transfer);
 }
 
 /**
  * POST /api/transfers/:id/unarchive
  * Unarchive a transfer, restoring it to default list results.
+ * Body may include `reason` and `expectedUpdatedAt` (optimistic concurrency).
  */
 function unarchiveTransfer(req, res) {
-  const transfer = transferService.unarchiveTransfer(req.params.id);
+  const transfer = transferService.unarchiveTransfer(
+    req.params.id,
+    archiveMutationOptions(req)
+  );
   res.json(transfer);
 }
 

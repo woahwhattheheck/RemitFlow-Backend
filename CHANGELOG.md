@@ -18,6 +18,13 @@ When preparing a new release:
 
 ### Added
 
+- Monotonic, auditable archive/unarchive lifecycle for transfers: each
+  archive or unarchive appends an immutable `archiveHistory` event with
+  actor, reason, and a non-decreasing timestamp; `lastArchivedAt` retains
+  the prior archive instant after unarchive so reconciliation is not lost.
+  Optional `expectedUpdatedAt` (body or `If-Match`) rejects stale concurrent
+  commands with `409 STALE_ARCHIVE_COMMAND`. Audit log entries
+  `transfer.archived` / `transfer.unarchived` carry the same actor/reason.
 - Cursor pagination for `GET /api/transfers` and `GET /api/audit`. Pass
   `?cursor=` (with optional `?order=asc|desc`) to page by an indexed position
   instead of a row offset; responses carry a `pageInfo` block with
