@@ -281,6 +281,8 @@ function createTransferUnchecked(data, requestId, idempotency) {
       sendAmount: transfer.sendAmount,
     },
     requestId,
+    actor: idempotency ? idempotency.actor : undefined,
+    outcome: 'success',
   });
 
   if (idempotency) {
@@ -319,7 +321,7 @@ function transition(transfer, nextStatus) {
  * @param {string} [requestId] - optional correlation id for audit logging
  * @returns {object}
  */
-function claimTransfer(id, requestId) {
+function claimTransfer(id, requestId, actor) {
   const transfer = getTransferOrThrow(id);
   transition(transfer, TRANSFER_STATUS.CLAIMED);
   transfer.claimableBalanceId = stellarService.createClaimableBalanceId();
@@ -329,6 +331,8 @@ function claimTransfer(id, requestId) {
     resourceId: transfer.id,
     payload: { claimableBalanceId: transfer.claimableBalanceId },
     requestId,
+    actor,
+    outcome: 'success',
   });
 
   return transfer;
@@ -340,7 +344,7 @@ function claimTransfer(id, requestId) {
  * @param {string} [requestId] - optional correlation id for audit logging
  * @returns {object}
  */
-function cancelTransfer(id, requestId) {
+function cancelTransfer(id, requestId, actor) {
   const transfer = getTransferOrThrow(id);
   transition(transfer, TRANSFER_STATUS.CANCELLED);
 
@@ -349,6 +353,8 @@ function cancelTransfer(id, requestId) {
     resourceId: transfer.id,
     payload: {},
     requestId,
+    actor,
+    outcome: 'success',
   });
 
   return transfer;
@@ -361,12 +367,21 @@ function cancelTransfer(id, requestId) {
  * @param {string} id
  * @returns {object}
  */
-function archiveTransfer(id) {
+function archiveTransfer(id, requestId, actor) {
   const transfer = getTransferOrThrow(id);
   if (!transfer.archivedAt) {
     const timestamp = nextTimestamp(transfer.updatedAt);
     transfer.archivedAt = timestamp;
     transfer.updatedAt = timestamp;
+
+    auditService.addEntry({
+      action: 'transfer.archived',
+      resourceId: transfer.id,
+      payload: { archivedAt: transfer.archivedAt },
+      requestId,
+      actor,
+      outcome: 'success',
+    });
   }
   return transfer;
 }
@@ -376,13 +391,23 @@ function archiveTransfer(id) {
  * @param {string} id
  * @returns {object}
  */
-function unarchiveTransfer(id) {
+function unarchiveTransfer(id, requestId, actor) {
   const transfer = getTransferOrThrow(id);
   if (!transfer.archivedAt) {
     throw ApiError.conflict(`Transfer is not archived: ${id}`);
   }
   transfer.archivedAt = null;
   transfer.updatedAt = nextTimestamp(transfer.updatedAt);
+
+  auditService.addEntry({
+    action: 'transfer.unarchived',
+    resourceId: transfer.id,
+    payload: {},
+    requestId,
+    actor,
+    outcome: 'success',
+  });
+
   return transfer;
 }
 

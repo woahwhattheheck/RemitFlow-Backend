@@ -1,0 +1,139 @@
+'use strict';
+
+const crypto = require('crypto');
+
+/**
+ * Cryptographic helpers for tamper-evident audit records.
+ *
+ * The hash chain binds each entry to its predecessor so a silent edit, insert,
+ * or reorder is detectable by recomputing the chain. Actor references are
+ * keyed digests of the API token so operators can filter by who acted without
+ * ever storing or returning the raw secret.
+ */
+
+/** Genesis predecessor for the first entry in a chain. */
+const GENESIS_HASH = '0'.repeat(64);
+
+/**
+ * Secret used to fingerprint actors. Falls back to the pagination cursor
+ * secret so a single ops configuration covers both, then to a per-process
+ * random value (correct for the in-memory demo store).
+ */
+const ACTOR_SECRET = process.env.AUDIT_ACTOR_SECRET
+  || process.env.PAGINATION_CURSOR_SECRET
+  || crypto.randomBytes(32).toString('hex');
+
+/**
+ * Field names (case-insensitive, ignoring `_` / `-`) that must never appear
+ * in stored or returned audit changes. Matched on every nested object key.
+ */
+const SENSITIVE_KEY_PATTERN = /^(password|passwd|secret|token|api[_-]?key|authorization|auth|bearer|private[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|ssn|cvv|pin|credential|credentials)$/i;
+
+const REDACTED = '[REDACTED]';
+
+/**
+ * Deterministic JSON encoding so hash inputs do not depend on key order.
+ * @param {*} value
+ * @returns {string}
+ */
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'null';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalize).join(',')}]`;
+  }
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`;
+}
+
+/**
+ * SHA-256 hex digest of a canonicalized value.
+ * @param {*} value
+ * @returns {string}
+ */
+function sha256(value) {
+  return crypto.createHash('sha256').update(canonicalize(value), 'utf8').digest('hex');
+}
+
+/**
+ * Stable, non-reversible actor reference derived from an API token.
+ * Anonymous / missing actors collapse to the literal `"system"`.
+ * @param {string|null|undefined} token
+ * @returns {string}
+ */
+function actorRef(token) {
+  if (token == null || token === '') return 'system';
+  return `actor:${crypto.createHmac('sha256', ACTOR_SECRET).update(String(token)).digest('hex').slice(0, 16)}`;
+}
+
+/**
+ * Deep-clone `value`, replacing sensitive keys with `[REDACTED]`.
+ * Non-objects are returned as-is. Arrays are walked element-wise.
+ * @param {*} value
+ * @returns {*}
+ */
+function redact(value) {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(redact);
+
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (SENSITIVE_KEY_PATTERN.test(key.replace(/-/g, '_'))) {
+      out[key] = REDACTED;
+    } else if (child != null && typeof child === 'object') {
+      out[key] = redact(child);
+    } else {
+      out[key] = child;
+    }
+  }
+  return out;
+}
+
+/**
+ * Compute the integrity hash for one audit entry given its predecessor hash.
+ * Only fields that define the event participate; `entryHash` itself is excluded.
+ * @param {object} entry
+ * @param {string} prevHash
+ * @returns {string}
+ */
+function computeEntryHash(entry, prevHash) {
+  return sha256({
+    prevHash,
+    chainSeq: entry.chainSeq,
+    id: entry.id,
+    action: entry.action,
+    scope: entry.scope,
+    target: entry.target,
+    actor: entry.actor,
+    correlationId: entry.correlationId,
+    outcome: entry.outcome,
+    changes: entry.changes,
+    at: entry.at,
+  });
+}
+
+/**
+ * Derive a coarse scope from a dotted action (`transfer.created` → `transfers`).
+ * @param {string} action
+ * @returns {string}
+ */
+function scopeFromAction(action) {
+  const head = String(action || '').split('.')[0] || 'unknown';
+  if (head === 'transfer') return 'transfers';
+  if (head === 'user') return 'users';
+  if (head === 'admin') return 'admin';
+  return `${head}s`;
+}
+
+module.exports = {
+  GENESIS_HASH,
+  REDACTED,
+  SENSITIVE_KEY_PATTERN,
+  actorRef,
+  canonicalize,
+  computeEntryHash,
+  redact,
+  scopeFromAction,
+  sha256,
+};

@@ -1,0 +1,375 @@
+'use strict';
+
+/**
+ * Tamper-evident, queryable audit storage (issue #127).
+ *
+ * Covers:
+ *   - integrity-chain verification and tamper detection (original failure mode)
+ *   - redaction of secrets from stored / returned changes
+ *   - duplicate-event suppression for the same privileged mutation
+ *   - query authorization (audit:read scope)
+ *   - correlation / attribution filters without exposing secrets
+ */
+
+const { test, before, after, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+
+process.env.NODE_ENV = 'test';
+
+const createApp = require('../src/app');
+const { reset } = require('../src/store');
+const auditService = require('../src/services/auditService');
+const transferService = require('../src/services/transferService');
+const { REDACTED, computeEntryHash, GENESIS_HASH } = require('../src/utils/auditCrypto');
+
+let server;
+let baseUrl;
+
+before(() => {
+  const app = createApp();
+  return new Promise((resolve) => {
+    server = app.listen(0, () => {
+      const { port } = server.address();
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
+  });
+});
+
+after(() => {
+  if (server) server.close();
+});
+
+beforeEach(() => {
+  reset();
+});
+
+function auth(token) {
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function fetchJson(path, options = {}) {
+  const res = await fetch(`${baseUrl}${path}`, options);
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body };
+}
+
+const TRANSFER = {
+  senderName: 'Alice',
+  recipientName: 'Bob',
+  amount: 50,
+  from: 'USD',
+  to: 'INR',
+};
+
+// ─── Integrity chain ──────────────────────────────────────────────────────────
+
+test('integrity-chain: successive entries link via prevHash and verify clean', () => {
+  const a = auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-1',
+    requestId: 'req-1',
+    actor: 'test-token-admin',
+  });
+  const b = auditService.addEntry({
+    action: 'transfer.claimed',
+    resourceId: 'txn-1',
+    requestId: 'req-2',
+    actor: 'test-token-admin',
+  });
+
+  assert.equal(a.chainSeq, 0);
+  assert.equal(a.prevHash, GENESIS_HASH);
+  assert.equal(b.chainSeq, 1);
+  assert.equal(b.prevHash, a.entryHash);
+  assert.notEqual(a.entryHash, b.entryHash);
+  assert.equal(a.entryHash, computeEntryHash(a, GENESIS_HASH));
+
+  const report = auditService.verifyIntegrity();
+  assert.equal(report.valid, true);
+  assert.equal(report.checked, 2);
+  assert.equal(report.tipHash, b.entryHash);
+  assert.equal(report.brokenAt, null);
+});
+
+test('REGRESSION: silent field edit on an audit record is detectable', () => {
+  // Original failure mode: an investigator cannot trust an audit trail if a
+  // record can be changed without leaving evidence. Mutating a stored field
+  // must break the hash chain.
+  auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-tamper',
+    payload: { sendAmount: 10 },
+    requestId: 'req-tamper',
+    actor: 'test-token-admin',
+  });
+  auditService.addEntry({
+    action: 'transfer.cancelled',
+    resourceId: 'txn-tamper',
+    requestId: 'req-tamper-2',
+    actor: 'test-token-admin',
+  });
+
+  assert.equal(auditService.verifyIntegrity().valid, true);
+
+  const [newest] = auditService.getEntries();
+  newest.action = 'transfer.claimed'; // silent rewrite
+
+  const report = auditService.verifyIntegrity();
+  assert.equal(report.valid, false);
+  assert.equal(report.brokenAt, newest.chainSeq);
+  assert.match(report.reason, /entryHash mismatch/);
+});
+
+test('REGRESSION: broken predecessor link is detectable', () => {
+  auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-a',
+    requestId: 'req-a',
+  });
+  const second = auditService.addEntry({
+    action: 'transfer.claimed',
+    resourceId: 'txn-a',
+    requestId: 'req-b',
+  });
+
+  second.prevHash = GENESIS_HASH; // pretend the first entry never happened
+
+  const report = auditService.verifyIntegrity();
+  assert.equal(report.valid, false);
+  assert.match(report.reason, /prevHash mismatch/);
+});
+
+// ─── Redaction ────────────────────────────────────────────────────────────────
+
+test('redaction: sensitive keys are stripped from stored changes', () => {
+  const entry = auditService.addEntry({
+    action: 'admin.config_changed',
+    resourceId: 'cfg-1',
+    requestId: 'req-redact',
+    actor: 'test-token-admin',
+    changes: {
+      feePercent: 1.5,
+      apiKey: 'super-secret-key',
+      nested: { token: 'abc', safe: true },
+      authorization: 'Bearer leaked',
+    },
+  });
+
+  assert.equal(entry.changes.feePercent, 1.5);
+  assert.equal(entry.changes.apiKey, REDACTED);
+  assert.equal(entry.changes.nested.token, REDACTED);
+  assert.equal(entry.changes.nested.safe, true);
+  assert.equal(entry.changes.authorization, REDACTED);
+  // Compat alias stays in sync with the redacted view.
+  assert.deepEqual(entry.payload, entry.changes);
+  // Raw secret must not survive anywhere on the entry.
+  assert.equal(JSON.stringify(entry).includes('super-secret-key'), false);
+});
+
+test('redaction: HTTP list responses never expose secrets', async () => {
+  auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-secret',
+    requestId: 'req-secret',
+    actor: 'test-token-admin',
+    changes: { sendAmount: 42, secret: 'should-not-leak', password: 'nope' },
+  });
+
+  const { status, body } = await fetchJson('/api/audit?resourceId=txn-secret', {
+    headers: auth('test-token-admin'),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.entries.length, 1);
+  assert.equal(body.entries[0].changes.secret, REDACTED);
+  assert.equal(body.entries[0].changes.password, REDACTED);
+  assert.equal(body.entries[0].changes.sendAmount, 42);
+  assert.equal(JSON.stringify(body).includes('should-not-leak'), false);
+});
+
+// ─── Duplicate-event suppression ──────────────────────────────────────────────
+
+test('duplicate-event: same action/target/correlation/outcome records once', () => {
+  const first = auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-dup',
+    requestId: 'corr-dup',
+    actor: 'test-token-admin',
+    outcome: 'success',
+    payload: { sendAmount: 1 },
+  });
+  const second = auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-dup',
+    requestId: 'corr-dup',
+    actor: 'test-token-admin',
+    outcome: 'success',
+    payload: { sendAmount: 99 },
+  });
+
+  assert.equal(second.id, first.id);
+  assert.equal(auditService.getEntries().length, 1);
+  assert.equal(first.changes.sendAmount, 1, 'first-write wins; retry must not rewrite');
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
+
+test('duplicate-event: a different correlation id still appends', () => {
+  auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-dup-2',
+    requestId: 'corr-1',
+    outcome: 'success',
+  });
+  auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-dup-2',
+    requestId: 'corr-2',
+    outcome: 'success',
+  });
+  assert.equal(auditService.getEntries().length, 2);
+});
+
+test('duplicate-event: privileged transfer create emits one outcome under retry', () => {
+  const first = transferService.createTransfer(TRANSFER, 'corr-idem', {
+    actor: 'test-token-admin',
+    key: 'idem-audit-1',
+    fingerprint: 'fp-audit-1',
+  });
+  // Force a second audit attempt with the same correlation id (simulates a
+  // client that retried past the idempotency layer and hit addEntry again).
+  const replayed = auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: first.id,
+    requestId: 'corr-idem',
+    actor: 'test-token-admin',
+    outcome: 'success',
+  });
+
+  const created = auditService.getEntries().filter((e) => e.action === 'transfer.created');
+  assert.equal(created.length, 1);
+  assert.equal(replayed.id, created[0].id);
+});
+
+// ─── Query authorization ──────────────────────────────────────────────────────
+
+test('query authorization: missing token is 401', async () => {
+  const { status, body } = await fetchJson('/api/audit');
+  assert.equal(status, 401);
+  assert.equal(body.error.status, 401);
+});
+
+test('query authorization: token without audit:read is 403', async () => {
+  const { status, body } = await fetchJson('/api/audit', {
+    headers: auth('test-token-transfers'),
+  });
+  assert.equal(status, 403);
+  assert.equal(body.error.status, 403);
+});
+
+test('query authorization: integrity endpoint requires audit:read', async () => {
+  const denied = await fetchJson('/api/audit/integrity', {
+    headers: auth('test-token-transfers'),
+  });
+  assert.equal(denied.status, 403);
+
+  const allowed = await fetchJson('/api/audit/integrity', {
+    headers: auth('test-token-readonly'),
+  });
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.body.valid, true);
+  assert.equal(typeof allowed.body.tipHash, 'string');
+});
+
+// ─── Correlation / attribution filters ────────────────────────────────────────
+
+test('correlation: entries carry actor fingerprint, scope, outcome, correlationId', () => {
+  const entry = auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-corr',
+    requestId: 'corr-xyz',
+    actor: 'test-token-admin',
+    outcome: 'success',
+    payload: { sendAmount: 5 },
+  });
+
+  assert.equal(entry.correlationId, 'corr-xyz');
+  assert.equal(entry.requestId, 'corr-xyz');
+  assert.equal(entry.target, 'txn-corr');
+  assert.equal(entry.resourceId, 'txn-corr');
+  assert.equal(entry.scope, 'transfers');
+  assert.equal(entry.outcome, 'success');
+  assert.match(entry.actor, /^actor:[0-9a-f]{16}$/);
+  assert.equal(entry.actor.includes('test-token-admin'), false);
+});
+
+test('correlation: operators can filter by correlationId and scope', async () => {
+  auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-f1',
+    requestId: 'corr-filter',
+    actor: 'test-token-admin',
+  });
+  auditService.addEntry({
+    action: 'user.created',
+    resourceId: 'usr-f1',
+    requestId: 'corr-other',
+    actor: 'test-token-admin',
+  });
+  auditService.addEntry({
+    action: 'transfer.claimed',
+    resourceId: 'txn-f1',
+    requestId: 'corr-filter',
+    actor: 'test-token-readonly',
+  });
+
+  const byCorr = await fetchJson('/api/audit?correlationId=corr-filter', {
+    headers: auth('test-token-admin'),
+  });
+  assert.equal(byCorr.status, 200);
+  assert.equal(byCorr.body.entries.length, 2);
+  assert.ok(byCorr.body.entries.every((e) => e.correlationId === 'corr-filter'));
+
+  const byScope = await fetchJson('/api/audit?scope=users', {
+    headers: auth('test-token-admin'),
+  });
+  assert.equal(byScope.status, 200);
+  assert.equal(byScope.body.entries.length, 1);
+  assert.equal(byScope.body.entries[0].action, 'user.created');
+
+  // Actor fingerprints differ across tokens; filtering by one excludes the other.
+  const adminActor = auditService.getEntries().find((e) => e.action === 'transfer.created').actor;
+  const byActor = await fetchJson(`/api/audit?actor=${encodeURIComponent(adminActor)}`, {
+    headers: auth('test-token-admin'),
+  });
+  assert.equal(byActor.status, 200);
+  assert.ok(byActor.body.entries.length >= 1);
+  assert.ok(byActor.body.entries.every((e) => e.actor === adminActor));
+  assert.equal(JSON.stringify(byActor.body).includes('test-token-admin'), false);
+});
+
+test('privileged archive/unarchive mutations each emit one outcome event', () => {
+  const transfer = transferService.createTransfer(TRANSFER, 'corr-arch-create', {
+    actor: 'test-token-admin',
+    key: 'idem-arch',
+    fingerprint: 'fp-arch',
+  });
+
+  transferService.archiveTransfer(transfer.id, 'corr-arch', 'test-token-admin');
+  transferService.archiveTransfer(transfer.id, 'corr-arch', 'test-token-admin'); // idempotent no-op
+
+  const archived = auditService.getEntries().filter((e) => e.action === 'transfer.archived');
+  assert.equal(archived.length, 1);
+  assert.equal(archived[0].outcome, 'success');
+  assert.equal(archived[0].correlationId, 'corr-arch');
+
+  transferService.unarchiveTransfer(transfer.id, 'corr-unarch', 'test-token-admin');
+  const unarchived = auditService.getEntries().filter((e) => e.action === 'transfer.unarchived');
+  assert.equal(unarchived.length, 1);
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
