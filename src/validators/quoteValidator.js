@@ -12,10 +12,9 @@ const currencyPolicy = require('../utils/currencyPolicy');
  */
 function validateQuoteQuery(req) {
   const { amount, from, to } = req.query;
-  // Quotes do not enforce the transfer max — they are informational — but
-  // they do enforce currency support, precision, and positive/safe range.
+  // A successful preview must also pass the transfer amount ceiling.
   return currencyPolicy.validateTransferPair(amount, from, to, {
-    enforceMax: false,
+    enforceMax: true,
   });
 }
 
