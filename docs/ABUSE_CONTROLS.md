@@ -34,8 +34,10 @@ token (or admin key) — never the raw secret. Public quote uses the client IP.
 Shared cap: `MUTATION_RATE_LIMIT_MAX_KEYS` (default `10000`).
 
 Actors are isolated: one token burning its transfer budget does not exhaust
-another token's budget. Limiter tables are bounded — under an identity flood,
-expired windows are pruned first, then the oldest key is dropped.
+another token's budget. Limiter tables are bounded. Expired windows are pruned
+first; when every key is still live, a new identity receives 429 with
+`Retry-After` until a slot expires. This preserves active budgets under an
+identity flood, at the cost of delaying new identities when the table is full.
 
 ## Proxy trust
 
