@@ -78,10 +78,12 @@ test('fingerprint is stable, truncated, and never echoes the secret', () => {
 test('resolveClientIp ignores X-Forwarded-For unless trustProxy is on', () => {
   const req = mockReq({
     remoteAddress: '10.0.0.5',
+    // Express trust proxy 1 resolves the nearest untrusted hop.
+    ip: '10.0.0.1',
     headers: { 'X-Forwarded-For': '203.0.113.9, 10.0.0.1' },
   });
   assert.equal(resolveClientIp(req, { trustProxy: false }), '10.0.0.5');
-  assert.equal(resolveClientIp(req, { trustProxy: true }), '203.0.113.9');
+  assert.equal(resolveClientIp(req, { trustProxy: true }), '10.0.0.1');
 });
 
 test('resolveActorKey prefers token fingerprint over IP', () => {
@@ -173,27 +175,38 @@ test('proxy trust: forged X-Forwarded-For cannot rotate identity when trustProxy
   assert.equal(blocked.err.statusCode, 429);
 });
 
-test('proxy trust: distinct forwarded IPs are isolated when trustProxy is true', async () => {
-  const limiter = rateLimit({
+test('proxy trust: forged left-most X-Forwarded-For cannot rotate a one-hop identity', async () => {
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use(rateLimit({
     name: 'global',
     windowMs: 60_000,
     max: 1,
     forceInTest: true,
     trustProxy: true,
-  });
+  }));
+  app.get('/ping', (_req, res) => res.json({ ok: true }));
+  app.use(errorHandler);
 
-  const a = mockReq({
-    remoteAddress: '10.0.0.5',
-    headers: { 'X-Forwarded-For': '198.51.100.1' },
-  });
-  const b = mockReq({
-    remoteAddress: '10.0.0.5',
-    headers: { 'X-Forwarded-For': '198.51.100.2' },
-  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
 
-  assert.equal((await run(limiter, a, mockRes())).err, null);
-  assert.equal((await run(limiter, a, mockRes())).err.statusCode, 429);
-  assert.equal((await run(limiter, b, mockRes())).err, null);
+  try {
+    async function ping(forwarded) {
+      return fetch(`http://127.0.0.1:${port}/ping`, {
+        headers: { 'X-Forwarded-For': forwarded },
+      });
+    }
+    const first = await ping('198.51.100.1, 203.0.113.9');
+    assert.equal(first.status, 200);
+    const forged = await ping('198.51.100.2, 203.0.113.9');
+    assert.equal(forged.status, 429);
+    const other = await ping('198.51.100.2, 203.0.113.10');
+    assert.equal(other.status, 200);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('limiter state is bounded by maxKeys under identity flood', async () => {
