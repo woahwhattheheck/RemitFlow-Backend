@@ -37,7 +37,7 @@ function calculateFee(amount, fromCode = config.baseCurrency) {
  */
 function getQuote(amount, from, to) {
   const canonical = currencyPolicy.canonicalizeAmount(amount, from, {
-    enforceMax: false,
+    enforceMax: true,
   });
   if (!canonical.ok) {
     throw ApiError.badRequest(canonical.errors[0] || 'Invalid amount');
