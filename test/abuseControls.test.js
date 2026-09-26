@@ -209,24 +209,32 @@ test('proxy trust: forged left-most X-Forwarded-For cannot rotate a one-hop iden
   }
 });
 
-test('limiter state is bounded by maxKeys under identity flood', async () => {
+test('maxKeys capacity preserves active budgets under identity flood', async () => {
   const limiter = rateLimit({
     name: 'global',
     windowMs: 60_000,
-    max: 100,
+    max: 1,
     maxKeys: 5,
     forceInTest: true,
     keyGenerator: (req) => req.actor,
   });
 
-  for (let i = 0; i < 20; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     const req = mockReq();
     req.actor = `actor-${i}`;
-    const { err } = await run(limiter, req, mockRes());
-    assert.equal(err, null);
+    assert.equal((await run(limiter, req, mockRes())).err, null);
   }
 
-  assert.ok(limiter.size() <= 5);
+  const newcomer = mockReq();
+  newcomer.actor = 'actor-new';
+  const full = await run(limiter, newcomer, mockRes());
+  assert.equal(full.err.statusCode, 429);
+  assert.ok(Number(full.res.headers['Retry-After']) >= 1);
+  assert.equal(limiter.size(), 5);
+
+  const original = mockReq();
+  original.actor = 'actor-0';
+  assert.equal((await run(limiter, original, mockRes())).err.statusCode, 429);
 });
 
 test('correlation id is echoed on success and on 429 without leaking tokens', async () => {
