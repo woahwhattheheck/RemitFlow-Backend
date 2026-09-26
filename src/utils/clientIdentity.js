@@ -28,8 +28,8 @@ function fingerprint(value) {
  * Resolve the client IP for rate limiting.
  *
  * When `trustProxy` is false (default), only the direct socket address is
- * used. When true, the left-most `X-Forwarded-For` hop is accepted — callers
- * must terminate TLS / strip untrusted hops at the edge first.
+ * used. When true, Express resolves `req.ip` from its configured trusted
+ * proxy hops. The left-most forwarded value is not necessarily trustworthy.
  *
  * @param {import('express').Request} req
  * @param {{ trustProxy?: boolean }} [options]
@@ -37,14 +37,8 @@ function fingerprint(value) {
  */
 function resolveClientIp(req, options = {}) {
   const trustProxy = Boolean(options.trustProxy);
-  if (trustProxy) {
-    const forwarded = req.get('X-Forwarded-For');
-    if (typeof forwarded === 'string' && forwarded.trim()) {
-      const first = forwarded.split(',')[0].trim();
-      if (first) {
-        return first;
-      }
-    }
+  if (trustProxy && typeof req.ip === 'string' && req.ip) {
+    return req.ip;
   }
   return (req.socket && req.socket.remoteAddress) || req.ip || 'unknown';
 }
