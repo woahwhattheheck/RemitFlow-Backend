@@ -8,9 +8,9 @@ const { resolveClientIp } = require('../utils/clientIdentity');
  *
  * Counters live only in process memory (fine for a single-node demo). A
  * production deployment should back this with a shared store such as Redis.
- * The map is capped by `maxKeys`: expired entries are pruned first, then the
- * oldest insert is dropped so a flood of unique identities cannot grow memory
- * without bound.
+ * The map is capped by `maxKeys`: expired entries are pruned first. When
+ * all slots are live, new identities receive 429 until a slot expires rather
+ * than evicting an active budget and allowing repeat attempts.
  *
  * Under `NODE_ENV=test` the limiter is a no-op unless
  * `ENABLE_RATE_LIMIT_IN_TEST=1`, so the rest of the suite is not coupled to
@@ -48,19 +48,18 @@ function rateLimit(options = {}) {
     }
   }
 
-  function evictIfNeeded(now) {
-    if (hits.size < maxKeys) {
-      return;
-    }
+  function hasCapacity(now) {
+    if (hits.size < maxKeys) return true;
     pruneExpired(now);
-    while (hits.size >= maxKeys) {
-      // Map iteration order is insertion order; drop the oldest key.
-      const oldest = hits.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      hits.delete(oldest);
+    return hits.size < maxKeys;
+  }
+
+  function capacityRetryAfter(now) {
+    let earliest = Infinity;
+    for (const entry of hits.values()) {
+      earliest = Math.min(earliest, entry.resetAt);
     }
+    return Math.max(1, Math.ceil((earliest - now) / 1000));
   }
 
   function rateLimitMiddleware(req, res, next) {
@@ -77,9 +76,22 @@ function rateLimit(options = {}) {
     let entry = hits.get(key);
 
     if (!entry || now >= entry.resetAt) {
-      evictIfNeeded(now);
+      if (!hasCapacity(now)) {
+        const retryAfter = capacityRetryAfter(now);
+        res.set('X-RateLimit-Limit', String(max));
+        res.set('X-RateLimit-Remaining', '0');
+        res.set('X-RateLimit-Policy', name);
+        res.set('Retry-After', String(retryAfter));
+        return next(
+          ApiError.tooManyRequests('Rate limit capacity reached, please try again later', {
+            retryAfter,
+            limit: max,
+            windowMs,
+            policy: name,
+          })
+        );
+      }
       entry = { count: 0, resetAt: now + windowMs, touchedAt: now };
-      // Re-insert so the key moves to the end of insertion order.
       hits.delete(key);
       hits.set(key, entry);
     }
