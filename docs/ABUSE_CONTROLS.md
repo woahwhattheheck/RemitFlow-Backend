@@ -39,10 +39,11 @@ expired windows are pruned first, then the oldest key is dropped.
 
 ## Proxy trust
 
-`TRUST_PROXY=true` opts into honouring `X-Forwarded-For` (left-most hop) and
-Express `trust proxy`. **Leave it off** unless a reverse proxy strips
-untrusted hops. With the default, forged `X-Forwarded-For` values cannot
-rotate the client identity used for rate limiting.
+`TRUST_PROXY=true` uses Express `trust proxy` for one proxy hop. Rate
+limiting reads Express's resolved `req.ip`, so an attacker-controlled left-most
+`X-Forwarded-For` value cannot rotate the identity when the trusted proxy
+appends the connecting address. Configure the actual number of trusted proxy
+hops at deployment, and leave this off without a trusted reverse proxy.
 
 ## Correlation IDs
 
