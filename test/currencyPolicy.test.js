@@ -175,6 +175,27 @@ test('GET /api/quote rejects unsupported currency', async () => {
   );
 });
 
+test('GET /api/quote rejects a send amount beyond the transfer ceiling', async () => {
+  const amount = 999999;
+  const quote = await fetchJson(`/api/quote?amount=${amount}&from=USD&to=EUR`);
+  assert.equal(quote.status, 400);
+  assert.ok(quote.body.error.details.errors.some((e) => /must not exceed/i.test(e)));
+
+  assert.ok(validateCreateTransfer({
+    body: {
+      senderName: 'Alice',
+      recipientName: 'Bob',
+      amount,
+      from: 'USD',
+      to: 'EUR',
+    },
+  }).some((e) => /must not exceed/i.test(e)));
+  assert.throws(
+    () => quoteService.getQuote(amount, 'USD', 'EUR'),
+    (err) => /must not exceed/i.test(err.message)
+  );
+});
+
 test('GET /api/quote rejects fractional JPY send amount', async () => {
   const { status, body } = await fetchJson('/api/quote?amount=10.5&from=JPY&to=USD');
   assert.equal(status, 400);
