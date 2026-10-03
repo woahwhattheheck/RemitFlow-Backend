@@ -237,6 +237,140 @@ test('maxKeys capacity preserves active budgets under identity flood', async () 
   assert.equal((await run(limiter, original, mockRes())).err.statusCode, 429);
 });
 
+test('an unchanged full table has bounded traversal work during a rejection burst', async (t) => {
+  t.mock.method(Date, 'now', () => 1_000);
+  const NativeMap = global.Map;
+  let visited = 0;
+  function* countEntries(iterator) {
+    for (const entry of iterator) {
+      visited += 1;
+      yield entry;
+    }
+  }
+  class CountingMap extends NativeMap {
+    [Symbol.iterator]() { return countEntries(super[Symbol.iterator]()); }
+    entries() { return countEntries(super.entries()); }
+    values() { return countEntries(super.values()); }
+    keys() { return countEntries(super.keys()); }
+    forEach(callback, thisArg) {
+      return super.forEach((value, key) => {
+        visited += 1;
+        callback.call(thisArg, value, key, this);
+      });
+    }
+  }
+
+  const maxKeys = 256;
+  let limiter;
+  // Observe collection work only in this limiter. Restore the constructor
+  // before any asynchronous request so unrelated code keeps the native Map.
+  try {
+    global.Map = CountingMap;
+    limiter = rateLimit({
+      windowMs: 60_000,
+      max: 1,
+      maxKeys,
+      forceInTest: true,
+      keyGenerator: (req) => req.actor,
+    });
+  } finally {
+    global.Map = NativeMap;
+  }
+
+  for (let i = 0; i < maxKeys; i += 1) {
+    assert.equal((await run(limiter, { actor: `known-${i}` }, mockRes())).err, null);
+  }
+  visited = 0;
+  for (let i = 0; i < 128; i += 1) {
+    const { err, res } = await run(limiter, { actor: `new-${i}` }, mockRes());
+    assert.equal(err.statusCode, 429);
+    assert.equal(res.headers['Retry-After'], '60');
+  }
+  assert.equal(limiter.size(), maxKeys);
+  assert.equal((await run(limiter, { actor: 'known-0' }, mockRes())).err.statusCode, 429);
+  // Permit one lazy scan, but reject repeated work proportional to the table
+  // size for a burst that cannot release or consume any slot.
+  assert.ok(visited <= maxKeys, `${visited} entries visited during unchanged-table rejection`);
+});
+
+test('capacity retry deadlines round up and release only expired budgets', async (t) => {
+  let now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  const limiter = rateLimit({
+    windowMs: 10_000, max: 1, maxKeys: 2, forceInTest: true,
+    keyGenerator: (req) => req.actor,
+  });
+  const request = (actor) => run(limiter, { actor }, mockRes());
+  assert.equal((await request('a')).err, null);
+  now = 5_000;
+  assert.equal((await request('b')).err, null);
+
+  now = 9_500;
+  let blocked = await request('c');
+  assert.equal(blocked.err.statusCode, 429);
+  assert.equal(blocked.res.headers['Retry-After'], '2');
+  now = 10_001;
+  blocked = await request('c');
+  assert.equal(blocked.res.headers['Retry-After'], '1');
+
+  now = 11_000;
+  assert.equal((await request('a')).err, null);
+  assert.equal(limiter.size(), 2);
+  blocked = await request('b');
+  assert.equal(blocked.err.statusCode, 429);
+  assert.equal(blocked.res.headers['Retry-After'], '4');
+  now = 15_000;
+  assert.equal((await request('c')).err, null);
+  assert.equal((await request('a')).err.statusCode, 429);
+  assert.equal(limiter.size(), 2);
+});
+
+test('renewal below capacity and reset keep retry deadlines correct after clock rollback', async (t) => {
+  let now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  const limiter = rateLimit({
+    windowMs: 10_000, max: 1, maxKeys: 2, forceInTest: true,
+    keyGenerator: (req) => req.actor,
+  });
+  const request = (actor) => run(limiter, { actor }, mockRes());
+  assert.equal((await request('a')).err, null);
+  now = 11_000;
+  assert.equal((await request('a')).err, null);
+  assert.equal((await request('b')).err, null);
+  now = 10_000;
+  let blocked = await request('c');
+  assert.equal(blocked.err.statusCode, 429);
+  assert.equal(blocked.res.headers['Retry-After'], '11');
+
+  now = 20_000;
+  limiter.reset();
+  assert.equal(limiter.size(), 0);
+  assert.equal((await request('a')).err, null);
+  assert.equal((await request('b')).err, null);
+  blocked = await request('c');
+  assert.equal(blocked.err.statusCode, 429);
+  assert.equal(blocked.res.headers['Retry-After'], '10');
+});
+
+test('a newly admitted earlier window becomes the capacity deadline after clock rollback', async (t) => {
+  let now = 11_000;
+  t.mock.method(Date, 'now', () => now);
+  const limiter = rateLimit({
+    windowMs: 10_000, max: 1, maxKeys: 2, forceInTest: true,
+    keyGenerator: (req) => req.actor,
+  });
+  const request = (actor) => run(limiter, { actor }, mockRes());
+  assert.equal((await request('a')).err, null);
+  now = 1_000;
+  assert.equal((await request('b')).err, null);
+  const blocked = await request('c');
+  assert.equal(blocked.err.statusCode, 429);
+  assert.equal(blocked.res.headers['Retry-After'], '10');
+  now = 11_000;
+  assert.equal((await request('c')).err, null);
+  assert.equal((await request('a')).err.statusCode, 429);
+});
+
 test('correlation id is echoed on success and on 429 without leaking tokens', async () => {
   const app = express();
   app.use(requestId);

@@ -39,27 +39,30 @@ function rateLimit(options = {}) {
 
   /** @type {Map<string, { count: number, resetAt: number, touchedAt: number }>} */
   const hits = new Map();
+  let nextResetAt = Infinity;
 
   function pruneExpired(now) {
+    // A full table should reject new identities without rescanning live budgets.
+    if (now < nextResetAt) return;
+    nextResetAt = Infinity;
     for (const [key, entry] of hits) {
       if (now >= entry.resetAt) {
         hits.delete(key);
+      } else {
+        nextResetAt = Math.min(nextResetAt, entry.resetAt);
       }
     }
   }
 
   function hasCapacity(now) {
-    if (hits.size < maxKeys) return true;
+    // Also prune before renewing an expired identity below capacity, so the
+    // cached deadline remains exact if the wall clock later moves backward.
     pruneExpired(now);
     return hits.size < maxKeys;
   }
 
   function capacityRetryAfter(now) {
-    let earliest = Infinity;
-    for (const entry of hits.values()) {
-      earliest = Math.min(earliest, entry.resetAt);
-    }
-    return Math.max(1, Math.ceil((earliest - now) / 1000));
+    return Math.max(1, Math.ceil((nextResetAt - now) / 1000));
   }
 
   function rateLimitMiddleware(req, res, next) {
@@ -94,6 +97,7 @@ function rateLimit(options = {}) {
       entry = { count: 0, resetAt: now + windowMs, touchedAt: now };
       hits.delete(key);
       hits.set(key, entry);
+      nextResetAt = Math.min(nextResetAt, entry.resetAt);
     }
 
     entry.count += 1;
@@ -123,6 +127,7 @@ function rateLimit(options = {}) {
 
   rateLimitMiddleware.reset = function reset() {
     hits.clear();
+    nextResetAt = Infinity;
   };
 
   rateLimitMiddleware.size = function size() {
