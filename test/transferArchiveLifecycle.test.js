@@ -2,11 +2,16 @@
 
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
+
+process.env.NODE_ENV = 'test';
 
 const { reset } = require('../src/store');
 const transferService = require('../src/services/transferService');
 const auditService = require('../src/services/auditService');
 const ApiError = require('../src/utils/ApiError');
+const config = require('../src/config');
+const createApp = require('../src/app');
 
 beforeEach(() => {
   reset();
@@ -28,6 +33,46 @@ function assertStrictlyIncreasing(timestamps) {
       timestamps[i] > timestamps[i - 1],
       `expected ${timestamps[i]} > ${timestamps[i - 1]} at index ${i}`
     );
+  }
+}
+
+const archiveWriterA = 'archive-lifecycle-invented-local-writer-a';
+const archiveWriterB = 'archive-lifecycle-invented-local-writer-b';
+const archiveReader = 'archive-lifecycle-invented-local-reader';
+
+async function startArchiveHttp(t) {
+  const originalTokens = config.apiTokens;
+  config.apiTokens = {
+    [archiveWriterA]: ['transfers:write'],
+    [archiveWriterB]: ['transfers:write'],
+    [archiveReader]: ['transfers:read', 'audit:read'],
+  };
+  const server = createApp().listen(0, '127.0.0.1');
+  t.after(async () => {
+    config.apiTokens = originalTokens;
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await once(server, 'listening');
+  const baseUrl = `http://127.0.0.1:${server.address().port}/api`;
+
+  return async (path, { token, method = 'GET', body, requestId } = {}) => {
+    const headers = { Authorization: `Bearer ${token}`, Connection: 'close' };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (requestId) headers['X-Request-Id'] = requestId;
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: response.status, body: await response.json() };
+  };
+}
+
+function assertNoArchiveCredentials(value) {
+  const serialized = JSON.stringify(value);
+  for (const token of [archiveWriterA, archiveWriterB, archiveReader]) {
+    assert.equal(serialized.includes(token), false, 'stored and readable records must omit bearer credentials');
   }
 }
 
@@ -346,6 +391,89 @@ test('audit: archive and unarchive record actor and reason', () => {
   assert.equal(transfer.archiveHistory[0].actor, 'auditor-token');
   assert.equal(transfer.archiveHistory[0].reason, 'compliance-review');
   assert.equal(transfer.archiveHistory[1].reason, 'review-complete');
+});
+
+test('HTTP archive cycles retain distinct, stable actors without exposing writer credentials', async (t) => {
+  const request = await startArchiveHttp(t);
+  const transfer = createSample();
+  let version = transfer.updatedAt;
+  const commands = [
+    { action: 'archive', token: archiveWriterA, reason: 'review' },
+    { action: 'unarchive', token: archiveWriterA, reason: 'review-complete' },
+    { action: 'archive', token: archiveWriterB, reason: 'second-review' },
+  ];
+
+  for (const [index, command] of commands.entries()) {
+    const requestId = `archive-http-${index}`;
+    const response = await request(`/transfers/${transfer.id}/${command.action}`, {
+      token: command.token,
+      method: 'POST',
+      body: { reason: command.reason, expectedUpdatedAt: version },
+      requestId,
+    });
+    assert.equal(response.status, 200);
+    const event = response.body.archiveHistory[index];
+    assert.match(event.actor, /^[a-f0-9]{16}$/);
+    assert.equal(event.reason, command.reason);
+    assert.equal(event.requestId, requestId);
+    assert.equal(event.at, response.body.updatedAt);
+    assert.ok(response.body.updatedAt > version);
+    assertNoArchiveCredentials(response.body);
+    version = response.body.updatedAt;
+  }
+
+  const actors = transfer.archiveHistory.map((event) => event.actor);
+  assert.equal(actors[0], actors[1], 'the same writer retains one actor across both endpoints');
+  assert.notEqual(actors[0], actors[2], 'different writers remain distinguishable');
+  const entries = auditService.getEntriesForResource(transfer.id)
+    .filter((entry) => entry.action !== 'transfer.created').reverse();
+  assert.deepEqual(entries.map((entry) => entry.payload.actor), actors);
+  assert.deepEqual(entries.map((entry) => entry.payload.reason), commands.map((command) => command.reason));
+  assert.deepEqual(entries.map((entry) => entry.requestId), ['archive-http-0', 'archive-http-1', 'archive-http-2']);
+  assertNoArchiveCredentials(transfer);
+  assertNoArchiveCredentials(entries);
+
+  for (const path of [
+    `/transfers/${transfer.id}`,
+    '/transfers?archived=all',
+    `/audit?resourceId=${transfer.id}`,
+  ]) {
+    const response = await request(path, { token: archiveReader });
+    assert.equal(response.status, 200);
+    assertNoArchiveCredentials(response.body);
+  }
+});
+
+test('HTTP unarchive fingerprints its writer and preserves legacy service actor labels', async (t) => {
+  const request = await startArchiveHttp(t);
+  const transfer = createSample();
+  transferService.archiveTransfer(transfer.id, {
+    actor: 'backoffice-job',
+    reason: 'legacy-review',
+    requestId: 'legacy-request',
+  });
+  const originalEvent = { ...transfer.archiveHistory[0] };
+
+  const response = await request(`/transfers/${transfer.id}/unarchive`, {
+    token: archiveWriterB,
+    method: 'POST',
+    body: { reason: 'restored-over-http', expectedUpdatedAt: transfer.updatedAt },
+    requestId: 'http-restore',
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.archivedAt, null);
+  assert.deepEqual(response.body.archiveHistory[0], originalEvent);
+  const event = response.body.archiveHistory[1];
+  assert.match(event.actor, /^[a-f0-9]{16}$/);
+  assert.equal(event.reason, 'restored-over-http');
+  assert.equal(event.requestId, 'http-restore');
+  assertNoArchiveCredentials(response.body);
+
+  const entries = auditService.getEntriesForResource(transfer.id);
+  assert.equal(entries.find((entry) => entry.action === 'transfer.archived').payload.actor, 'backoffice-job');
+  assert.equal(entries.find((entry) => entry.action === 'transfer.unarchived').payload.actor, event.actor);
+  assertNoArchiveCredentials(transfer);
+  assertNoArchiveCredentials(entries);
 });
 
 // ============================================================================

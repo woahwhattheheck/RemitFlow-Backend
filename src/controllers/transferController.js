@@ -2,6 +2,7 @@
 
 const transferService = require('../services/transferService');
 const { buildHistoryPage } = require('../utils/historyPage');
+const { actorFingerprint } = require('../utils/cursor');
 const idempotencyService = require('../services/idempotencyService');
 const ApiError = require('../utils/ApiError');
 
@@ -175,7 +176,8 @@ function archiveMutationOptions(req) {
   const body = req.body || {};
   return {
     requestId: req.id,
-    actor: req.token || null,
+    // History and audit responses must identify the caller without storing credentials.
+    actor: req.token ? actorFingerprint(req) : null,
     reason: body.reason,
     expectedUpdatedAt: readExpectedUpdatedAt(req),
   };

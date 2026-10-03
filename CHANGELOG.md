@@ -62,6 +62,14 @@ When preparing a new release:
 
 ### Fixed
 
+- Archive and unarchive HTTP requests now store the existing keyed actor
+  fingerprint in lifecycle history and audit entries, keeping bearer credentials
+  out of transfer and audit responses while preserving attribution across cycles.
+  Fingerprints share the pagination signing secret and the process-local store's
+  lifetime; trusted service callers retain their explicit actor labels. Existing
+  event timestamps, reasons, request IDs, retries, and stale-command checks are
+  unchanged.
+
 - Offset pagination over transfer and audit history repeated or skipped rows
   when records were written while a client was paging, because the window was
   defined by a row count rather than a position. Cursor pagination anchors to
