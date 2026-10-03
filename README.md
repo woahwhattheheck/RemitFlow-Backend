@@ -92,6 +92,15 @@ strings to their scope arrays:
 API_TOKENS='{"my-production-token":["transfers:read","transfers:write","users:read","users:write","audit:read"],"reporting-token":["transfers:read","audit:read"]}'
 ```
 
+An explicitly supplied value must be a JSON object with non-empty token keys,
+no leading or trailing key whitespace, and arrays of scopes from the catalog.
+Malformed JSON, blank values, invalid shapes, and unknown scopes stop startup
+with a configuration error that does not print credentials. They never enable
+the demo tokens. An empty object `{}` is valid and disables all API-token
+credentials; the separately configured legacy admin key retains its behavior.
+Only configured own entries are tokens, so inherited names such as `constructor`
+are unknown unless explicitly configured.
+
 If `API_TOKENS` is not set, the server starts with three **demo tokens** (safe
 for local development only — rotate before deploying):
 
