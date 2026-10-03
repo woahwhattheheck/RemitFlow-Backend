@@ -68,3 +68,32 @@ When `NODE_ENV=test`, rate limiters are no-ops unless
 `ENABLE_RATE_LIMIT_IN_TEST=1` (or a limiter is constructed with
 `forceInTest: true`). This keeps the functional suite independent of the
 abuse budget while still allowing focused regression coverage.
+
+## Reproduce saturated-table HTTP load
+
+With this checkout's normal dependencies installed, run:
+
+```sh
+node scripts/benchmark-rate-limit.cjs rate-limit-result.json > /dev/null
+```
+
+Use a new result filename. The script starts the real application on an ephemeral
+loopback port, enables the limiter explicitly in test mode, and uses one trusted
+proxy hop to generate distinct local identities. It admits 10,000 identities,
+then measures three batches of 2,000 rejected newcomers at 32 concurrent
+connections. Every measured response must be 429 with the global policy and
+matching correlation ID; an exhausted original identity must remain blocked.
+The script closes its server and connections when finished.
+
+JSON output retains each elapsed/CPU sample, Node and Express versions, and
+SHA-256 hashes of the application and limiter source. CPU includes both the
+HTTP client and server in the same process. Standard application logs go to
+stdout, so keep the same redirection for both versions being compared.
+
+To compare another checkout with its dependencies already installed, pass its
+path as the second argument. Alternate original/repaired/original/repaired runs
+using the same script and distinct output filenames; report medians and ranges
+because load on the host can vary. The workload uses generated local traffic and
+does not measure deployed throughput or external provider behavior. Repeated
+rejection avoids table scans until the next expiry; expiry-triggered cleanup
+still takes time proportional to the number of tracked identities.
