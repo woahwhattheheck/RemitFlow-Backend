@@ -58,7 +58,7 @@ const defaultProbes = Object.freeze({
   },
 
   async payments() {
-    const result = stellarService.ping();
+    const result = await stellarService.ping();
     if (!result || result.ok !== true) {
       const err = new Error('payments unavailable');
       err.reasonCode = REASON.PAYMENTS_UNAVAILABLE;
@@ -68,7 +68,7 @@ const defaultProbes = Object.freeze({
   },
 
   async fx() {
-    const result = rateService.ping();
+    const result = await rateService.ping();
     if (!result || result.ok !== true) {
       const err = new Error('fx unavailable');
       err.reasonCode = REASON.FX_UNAVAILABLE;

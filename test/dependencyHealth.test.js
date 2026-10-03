@@ -388,3 +388,197 @@ test('unit redact path never leaks custom throw messages', async () => {
   assert.equal(result.reason, 'PAYMENTS_UNAVAILABLE');
   assert.equal(JSON.stringify(result).includes('sk_live'), false);
 });
+
+// Exercise the default wrappers by replacing adapter methods, not health probes.
+const { execFile: execHealthChild } = require('node:child_process');
+const healthTestRepoRoot = require('node:path').resolve(__dirname, '..');
+const asyncHealthAdapters = [
+  { name: 'payments', reasonPrefix: 'PAYMENTS', service: require('../src/services/stellarService') },
+  { name: 'fx', reasonPrefix: 'FX', service: require('../src/services/rateService') },
+];
+
+// Detached provider rejections must fail only this child on an unrepaired head.
+// No unhandledRejection listener is installed in either process.
+const healthRejectionChildSource = '(' + (async function healthRejectionChild() {
+  process.env.NODE_ENV = 'test';
+  const createChildApp = require('./src/app');
+  const childConfig = require('./src/config');
+  const name = process.argv[1];
+  const mode = process.argv[2];
+  const provider = name === 'payments'
+    ? require('./src/services/stellarService')
+    : require('./src/services/rateService');
+  const originalPing = provider.ping;
+  const secret = 'RF140_SYNTHETIC_ASYNC_PROVIDER_SECRET';
+  const timeoutMs = 40;
+  childConfig.health.checkTimeoutMs = timeoutMs;
+
+  let childServer;
+  let rejectionTimer;
+  let result;
+  let markRejectionDelivered;
+  const rejectionDelivered = new Promise((resolve) => {
+    markRejectionDelivered = resolve;
+  });
+
+  try {
+    childServer = createChildApp().listen(0, '127.0.0.1');
+    await new Promise((resolve, reject) => {
+      childServer.once('listening', resolve);
+      childServer.once('error', reject);
+    });
+    const url = 'http://127.0.0.1:' + childServer.address().port;
+    async function requestJson(route) {
+      const response = await fetch(url + route, { signal: AbortSignal.timeout(2000) });
+      return { status: response.status, body: await response.json() };
+    }
+
+    provider.ping = () => new Promise((resolve, reject) => {
+      const fail = () => {
+        reject(new Error(secret));
+        markRejectionDelivered();
+      };
+      if (mode === 'late') {
+        rejectionTimer = setTimeout(fail, timeoutMs * 3);
+      } else {
+        fail();
+      }
+    });
+
+    const started = Date.now();
+    const down = await requestJson('/api/health/ready');
+    const elapsedMs = Date.now() - started;
+    const live = await requestJson('/api/health/live');
+    await rejectionDelivered;
+    // Let a detached rejection take its normal fatal path before reporting.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    provider.ping = originalPing;
+    const recovered = await requestJson('/api/health/ready');
+    result = { name, mode, timeoutMs, elapsedMs, down, live, recovered };
+  } finally {
+    provider.ping = originalPing;
+    clearTimeout(rejectionTimer);
+    if (childServer) {
+      childServer.closeAllConnections();
+      await new Promise((resolve) => childServer.close(resolve));
+    }
+  }
+
+  process.stdout.write('RF140_CHILD_RESULT ' + JSON.stringify(result) + '\n');
+}).toString() + ')().catch((error) => { console.error(error); process.exitCode = 1; });';
+
+async function observeHealthRejectionChild(name, mode) {
+  const child = await new Promise((resolve) => {
+    execHealthChild(
+      process.execPath,
+      ['--max-old-space-size=64', '--unhandled-rejections=strict', '-e', healthRejectionChildSource, name, mode],
+      {
+        cwd: healthTestRepoRoot,
+        env: { ...process.env, NODE_ENV: 'test' },
+        timeout: 10000,
+        maxBuffer: 128 * 1024,
+      },
+      (error, stdout, stderr) => resolve({
+        exitCode: error ? (error.code ?? 'PROCESS_ERROR') : 0,
+        signal: error ? error.signal : null,
+        stdout,
+        stderr,
+      })
+    );
+  });
+
+  assert.equal(
+    child.exitCode,
+    0,
+    name + ' ' + mode + ' child exit=' + child.exitCode +
+      ' signal=' + child.signal + '\n' + child.stderr
+  );
+  const marker = 'RF140_CHILD_RESULT ';
+  const resultLine = child.stdout.split('\n').find((line) => line.startsWith(marker));
+  assert.ok(resultLine, 'child did not report completed HTTP observations:\n' + child.stdout);
+  return JSON.parse(resultLine.slice(marker.length));
+}
+
+for (const { name, reasonPrefix, service } of asyncHealthAdapters) {
+  test(name + ' default adapter awaits async healthy and negative results and recovers', async () => {
+    const originalPing = service.ping;
+    try {
+      service.ping = async () => ({ ok: true });
+      const healthy = await fetchJson('/api/health/ready');
+      assert.equal(healthy.status, 200);
+      assert.equal(healthy.body.checks[name].status, 'ok');
+
+      service.ping = async () => ({ ok: false });
+      const down = await fetchJson('/api/health/ready');
+      assert.equal(down.status, 503);
+      assert.equal(down.body.checks[name].status, 'error');
+      assert.equal(down.body.checks[name].reason, reasonPrefix + '_UNAVAILABLE');
+
+      service.ping = async () => ({ ok: true });
+      const recovered = await fetchJson('/api/health/ready');
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.checks[name].status, 'ok');
+      assert.equal(recovered.body.checks[name].reason, undefined);
+    } finally {
+      service.ping = originalPing;
+    }
+  });
+
+  test(name + ' default adapter bounds a pending ping while liveness and recovery remain available', async () => {
+    const originalPing = service.ping;
+    try {
+      service.ping = () => new Promise(() => {});
+      const started = Date.now();
+      const [down, live] = await Promise.all([
+        fetchJson('/api/health/ready'),
+        fetchJson('/api/health/live'),
+      ]);
+      const elapsedMs = Date.now() - started;
+
+      assert.equal(down.status, 503);
+      assert.equal(down.body.checks[name].status, 'error');
+      assert.equal(down.body.checks[name].reason, reasonPrefix + '_TIMEOUT');
+      assert.ok(elapsedMs < 1000, 'pending ' + name + ' check took ' + elapsedMs + 'ms');
+      assert.equal(live.status, 200);
+      assert.equal(live.body.status, 'alive');
+
+      service.ping = originalPing;
+      const recovered = await fetchJson('/api/health/ready');
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.checks[name].status, 'ok');
+      assert.equal(recovered.body.checks[name].reason, undefined);
+    } finally {
+      service.ping = originalPing;
+    }
+  });
+
+  test(name + ' default adapter catches and redacts an immediate rejection without killing the process', async () => {
+    const observed = await observeHealthRejectionChild(name, 'immediate');
+    assert.equal(observed.down.status, 503);
+    assert.equal(observed.down.body.checks[name].status, 'error');
+    assert.equal(observed.down.body.checks[name].reason, reasonPrefix + '_UNAVAILABLE');
+    assert.equal(JSON.stringify(observed.down.body).includes('RF140_SYNTHETIC_ASYNC_PROVIDER_SECRET'), false);
+    assert.equal(observed.down.body.checks[name].message, undefined);
+    assert.equal(observed.down.body.checks[name].stack, undefined);
+    assert.equal(observed.live.status, 200);
+    assert.equal(observed.live.body.status, 'alive');
+    assert.equal(observed.recovered.status, 200);
+    assert.equal(observed.recovered.body.checks[name].status, 'ok');
+    assert.equal(observed.recovered.body.checks[name].reason, undefined);
+  });
+
+  test(name + ' default adapter survives a rejection after its deadline and recovers', async () => {
+    const observed = await observeHealthRejectionChild(name, 'late');
+    assert.equal(observed.down.status, 503);
+    assert.equal(observed.down.body.checks[name].status, 'error');
+    assert.equal(observed.down.body.checks[name].reason, reasonPrefix + '_TIMEOUT');
+    assert.ok(observed.elapsedMs < 1000, 'late ' + name + ' check took ' + observed.elapsedMs + 'ms');
+    assert.equal(JSON.stringify(observed.down.body).includes('RF140_SYNTHETIC_ASYNC_PROVIDER_SECRET'), false);
+    assert.equal(observed.live.status, 200);
+    assert.equal(observed.live.body.status, 'alive');
+    assert.equal(observed.recovered.status, 200);
+    assert.equal(observed.recovered.body.checks[name].status, 'ok');
+    assert.equal(observed.recovered.body.checks[name].reason, undefined);
+  });
+}

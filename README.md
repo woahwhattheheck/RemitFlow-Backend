@@ -236,6 +236,12 @@ The API implements Cache-Control response headers for security and efficiency:
   Returns `200` when ready and `503` with redacted reason codes when a dependency is down or times out.
   Probes re-run on every request so recovery does not require a restart.
   Tune the per-check budget with `HEALTH_CHECK_TIMEOUT_MS` (default `1000`).
+  Payment and FX `ping()` adapters may return their result immediately or as a Promise;
+  the default probes await that result before checking `ok`. Rejections remain attached
+  to the readiness error path, including after a timeout. The deadline bounds waiting,
+  but does not cancel the underlying Promise or interrupt synchronous blocking work.
+  The shipped adapters remain synchronous mocks: Stellar configuration and loaded FX
+  data checks do not establish live provider reachability.
 - `GET /api/version` — service name and version.
 
 ### Rates & quotes
