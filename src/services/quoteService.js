@@ -24,8 +24,14 @@ const ApiError = require('../utils/ApiError');
  * @returns {number}
  */
 function calculateFee(amount, fromCode = config.baseCurrency) {
-  const percentFee = money.percentage(amount, config.fee.percent, fromCode);
-  return currencyPolicy.roundToCurrency(percentFee + config.fee.flat, fromCode);
+  const percentFee = Number(amount) * (Number(config.fee.percent) / 100);
+  const fee = percentFee + config.fee.flat;
+  // Round both components together, compensating for binary drift at a
+  // half-minor-unit boundary (for example, 480 JPY yields 7.499999999999999).
+  return currencyPolicy.roundToCurrency(
+    fee + Math.abs(fee) * Number.EPSILON,
+    fromCode
+  );
 }
 
 /**

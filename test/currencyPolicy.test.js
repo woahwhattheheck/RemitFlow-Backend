@@ -130,6 +130,25 @@ test('JPY destination receiveAmount is a whole number', () => {
   assert.equal(Number.isInteger(quote.receiveAmount), true);
 });
 
+for (const [currency, amount, expectedFee] of [
+  ['JPY', 13, 0],
+  ['JPY', 14, 1],
+  ['JPY', 30, 1],
+  ['JPY', 80, 2],
+  ['JPY', 479, 7],
+  ['JPY', 480, 8],
+  ['JPY', 481, 8],
+  ['USD', 100.50, 1.81],
+  ['USD', 116.99, 2.05],
+  ['USD', 117, 2.06],
+  ['USD', 117.01, 2.06],
+  ['USD', 125, 2.18],
+]) {
+  test(`combined fee for ${amount} ${currency} rounds once to ${expectedFee}`, () => {
+    assert.equal(quoteService.calculateFee(amount, currency), expectedFee);
+  });
+}
+
 test('getQuote rejects unsupported currency before FX math', () => {
   assert.throws(
     () => quoteService.getQuote(10, 'USD', 'ZZZ'),
@@ -249,4 +268,33 @@ test('POST /api/transfers and GET /api/quote agree on canonical sendAmount', asy
   assert.equal(transferRes.body.from, quoteRes.body.from);
   assert.equal(transferRes.body.to, quoteRes.body.to);
   assert.equal(transferRes.body.receiveAmount, quoteRes.body.receiveAmount);
+});
+
+test('JPY quote and transfer use the fee rounded after both components are added', async () => {
+  const quoteRes = await fetchJson('/api/quote?amount=30&from=JPY&to=USD');
+  assert.equal(quoteRes.status, 200);
+  assert.equal(quoteRes.body.sendAmount, 30);
+  assert.equal(quoteRes.body.fee, 1);
+  assert.equal(quoteRes.body.amountAfterFee, 29);
+  assert.equal(quoteRes.body.receiveAmount, 0.19);
+
+  const transferRes = await fetchJson('/api/transfers', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token-admin',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'idem-currency-jpy-fee',
+    },
+    body: JSON.stringify({
+      senderName: 'Alice',
+      recipientName: 'Bob',
+      amount: 30,
+      from: 'JPY',
+      to: 'USD',
+    }),
+  });
+  assert.equal(transferRes.status, 201);
+  assert.equal(transferRes.body.sendAmount, 30);
+  assert.equal(transferRes.body.fee, 1);
+  assert.equal(transferRes.body.receiveAmount, 0.19);
 });
