@@ -17,6 +17,7 @@ const assert = require('node:assert/strict');
 process.env.NODE_ENV = 'test';
 
 const createApp = require('../src/app');
+const config = require('../src/config');
 const { reset } = require('../src/store');
 const auditService = require('../src/services/auditService');
 const transferService = require('../src/services/transferService');
@@ -423,6 +424,64 @@ test('query authorization: integrity endpoint requires audit:read', async () => 
 });
 
 // ─── Correlation / attribution filters ────────────────────────────────────────
+
+for (const token of ['actor:test-only-secret', 'actor:0123456789abcdef', 'system']) {
+  test(`raw credentials resembling actor references are fingerprinted: ${token}`, async (t) => {
+    const previous = config.apiTokens[token];
+    const hadToken = Object.hasOwn(config.apiTokens, token);
+    config.apiTokens[token] = ['transfers:read', 'transfers:write', 'users:read', 'users:write', 'audit:read'];
+    t.after(() => {
+      if (hadToken) config.apiTokens[token] = previous;
+      else delete config.apiTokens[token];
+    });
+
+    const request = (path, method = 'GET', body, key) => fetchJson(path, {
+      method,
+      headers: {
+        ...auth(token),
+        'Content-Type': 'application/json',
+        'X-Request-Id': 'actor-credential-workflow',
+        ...(key ? { 'Idempotency-Key': key } : {}),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+    const first = await request('/api/transfers', 'POST', TRANSFER, 'actor-first');
+    assert.equal(first.status, 201);
+    const id = first.body.id;
+    for (const action of ['archive', 'unarchive', 'cancel']) {
+      const response = await request(`/api/transfers/${id}/${action}`, 'POST');
+      assert.equal(response.status, 200);
+    }
+    const second = await request('/api/transfers', 'POST', TRANSFER, 'actor-second');
+    assert.equal(second.status, 201);
+    assert.equal((await request(`/api/transfers/${second.body.id}/claim`, 'POST')).status, 200);
+    const user = await request('/api/users', 'POST', {
+      name: 'Audit Profile', email: 'audit-profile@example.invalid', country: 'US',
+    });
+    assert.equal(user.status, 201);
+
+    const replay = await request('/api/transfers', 'POST', TRANSFER, 'actor-first');
+    assert.equal(replay.status, 201);
+    assert.equal(replay.body.id, id);
+
+    const expectedActor = auditService.actorRef(token);
+    const stored = auditService.getEntries();
+    assert.equal(stored.length, 7, 'replay must not append another outcome');
+    assert.ok(stored.every((entry) => entry.actor === expectedActor));
+    assert.equal(JSON.stringify(stored).includes(token), false);
+
+    const listed = await request('/api/audit?order=asc');
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.entries.length, 7);
+    assert.ok(listed.body.entries.every((entry) => entry.actor === expectedActor));
+    assert.equal(JSON.stringify(listed.body.entries).includes(token), false);
+    const filtered = await request(`/api/audit?actor=${encodeURIComponent(expectedActor)}`);
+    assert.equal(filtered.status, 200);
+    assert.equal(filtered.body.entries.length, 7);
+    assert.equal((await request('/api/audit/integrity')).body.valid, true);
+  });
+}
 
 test('correlation: entries carry actor fingerprint, scope, outcome, correlationId', () => {
   const entry = auditService.addEntry({

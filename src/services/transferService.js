@@ -281,7 +281,7 @@ function createTransferUnchecked(data, requestId, idempotency) {
       sendAmount: transfer.sendAmount,
     },
     requestId,
-    actor: idempotency ? idempotency.actor : undefined,
+    actorToken: idempotency ? idempotency.actor : undefined,
     outcome: 'success',
   });
 
@@ -331,7 +331,7 @@ function claimTransfer(id, requestId, actor) {
     resourceId: transfer.id,
     payload: { claimableBalanceId: transfer.claimableBalanceId },
     requestId,
-    actor,
+    actorToken: actor,
     outcome: 'success',
   });
 
@@ -353,7 +353,7 @@ function cancelTransfer(id, requestId, actor) {
     resourceId: transfer.id,
     payload: {},
     requestId,
-    actor,
+    actorToken: actor,
     outcome: 'success',
   });
 
@@ -380,7 +380,7 @@ function archiveTransfer(id, requestId, actor) {
       payload: { archivedAt: transfer.archivedAt },
       mutationId: transfer.updatedAt,
       requestId,
-      actor,
+      actorToken: actor,
       outcome: 'success',
     });
   }
@@ -406,7 +406,7 @@ function unarchiveTransfer(id, requestId, actor) {
     payload: {},
     mutationId: transfer.updatedAt,
     requestId,
-    actor,
+    actorToken: actor,
     outcome: 'success',
   });
 

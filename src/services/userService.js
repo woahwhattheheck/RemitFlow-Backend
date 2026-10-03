@@ -60,7 +60,7 @@ function createUser(data, requestId, actor) {
     resourceId: user.id,
     payload: { name: user.name, country: user.country },
     requestId,
-    actor,
+    actorToken: actor,
     outcome: 'success',
   });
 

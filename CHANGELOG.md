@@ -65,6 +65,11 @@ When preparing a new release:
 
 ### Fixed
 
+- Privileged mutation audit actors now fingerprint raw credentials even when a
+  configured token starts with `actor:` or equals `system`. Transfer and user
+  services use the explicit `actorToken` audit input; legacy precomputed actor
+  references and token-scoped idempotent transfer replay remain supported.
+
 - Offset pagination over transfer and audit history repeated or skipped rows
   when records were written while a client was paging, because the window was
   defined by a row count rather than a position. Cursor pagination anchors to

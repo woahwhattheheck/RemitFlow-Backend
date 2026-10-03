@@ -70,7 +70,8 @@ const eventsByIdentity = new Map();
  * @param {string} [params.requestId]  - legacy alias for correlationId
  * @param {string} [params.correlationId]
  * @param {string} [params.mutationId] - stable id of the recorded state change
- * @param {string} [params.actor]      - raw token or already-fingerprinted ref
+ * @param {string} [params.actor]      - legacy token or already-fingerprinted ref
+ * @param {string} [params.actorToken] - raw credential; always fingerprinted
  * @param {string} [params.scope]
  * @param {'success'|'failure'|string} [params.outcome]
  * @returns {object} the newly created (or previously recorded) audit entry
@@ -85,6 +86,7 @@ function addEntry({
   correlationId,
   mutationId,
   actor,
+  actorToken,
   scope,
   outcome = 'success',
 } = {}) {
@@ -103,9 +105,13 @@ function addEntry({
     ? String(mutationId)
     : undefined;
 
-  // Accept either a raw token (fingerprinted here) or a precomputed `actor:…` ref.
+  // Credentials must use the explicit input: their contents can resemble an
+  // existing actor reference (or the system sentinel). Keep legacy references
+  // working without treating a credential's spelling as proof of redaction.
   let resolvedActor;
-  if (actor == null || actor === '') {
+  if (actorToken !== undefined) {
+    resolvedActor = actorRef(actorToken);
+  } else if (actor == null || actor === '') {
     resolvedActor = 'system';
   } else if (String(actor).startsWith('actor:') || actor === 'system') {
     resolvedActor = String(actor);
