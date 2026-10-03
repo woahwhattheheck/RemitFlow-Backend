@@ -352,6 +352,60 @@ test('audit: archive and unarchive record actor and reason', () => {
 // Regression: original failure mode
 // ============================================================================
 
+test('regression: interleaved status and archive commands cannot reuse a version token', (t) => {
+  const now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+
+  for (const changeStatus of ['claimTransfer', 'cancelTransfer']) {
+    for (const initiallyArchived of [true, false]) {
+      const transfer = createSample();
+      transferService.archiveTransfer(transfer.id);
+      if (!initiallyArchived) transferService.unarchiveTransfer(transfer.id);
+
+      transferService[changeStatus](transfer.id);
+      const observed = transfer.updatedAt;
+      const action = initiallyArchived ? 'unarchiveTransfer' : 'archiveTransfer';
+      const staleAction = initiallyArchived ? 'archiveTransfer' : 'unarchiveTransfer';
+
+      transferService[action](transfer.id, { expectedUpdatedAt: observed });
+      assert.ok(
+        transfer.updatedAt > observed,
+        `${changeStatus} followed by ${action} must advance updatedAt`
+      );
+      const historyLength = transfer.archiveHistory.length;
+      const updatedAt = transfer.updatedAt;
+
+      assert.throws(
+        () => transferService[staleAction](transfer.id, { expectedUpdatedAt: observed }),
+        (err) => err instanceof ApiError && err.details.code === 'STALE_ARCHIVE_COMMAND'
+      );
+      assert.equal(transfer.updatedAt, updatedAt);
+      assert.equal(transfer.archiveHistory.length, historyLength);
+    }
+  }
+});
+
+test('regression: archive transitions respect history and legacy archive timestamp floors', (t) => {
+  const now = Date.now();
+  t.mock.method(Date, 'now', () => now - 60_000);
+
+  const transfer = createSample();
+  transferService.archiveTransfer(transfer.id);
+  transferService.unarchiveTransfer(transfer.id);
+  const historyAt = transfer.archiveHistory.at(-1).at;
+  transfer.updatedAt = transfer.createdAt;
+  transferService.archiveTransfer(transfer.id);
+  assert.ok(transfer.updatedAt > historyAt);
+
+  const legacy = createSample();
+  legacy.archivedAt = new Date(now + 60_000).toISOString();
+  const previousArchivedAt = legacy.archivedAt;
+  transferService.unarchiveTransfer(legacy.id);
+  assert.ok(legacy.updatedAt > previousArchivedAt);
+  assert.equal(legacy.lastArchivedAt, previousArchivedAt);
+  assert.equal(legacy.archiveHistory[0].at, legacy.updatedAt);
+});
+
 test('regression: repeated archive/unarchive does not hide earlier lifecycle timestamps', () => {
   const transfer = createSample();
 

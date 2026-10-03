@@ -12,10 +12,12 @@ const config = require('../config');
 
 // Keep lifecycle timestamps strictly increasing even when multiple operations
 // happen within the same millisecond (common in tests and API batches).
-function nextTimestamp(previous) {
-  const now = Date.now();
-  const previousMs = previous ? Date.parse(previous) : NaN;
-  return new Date(Math.max(now, Number.isFinite(previousMs) ? previousMs + 1 : now)).toISOString();
+function nextTimestamp(...previous) {
+  const next = previous.reduce((latest, value) => {
+    const previousMs = value ? Date.parse(value) : NaN;
+    return Number.isFinite(previousMs) ? Math.max(latest, previousMs + 1) : latest;
+  }, Date.now());
+  return new Date(next).toISOString();
 }
 
 /**
@@ -407,7 +409,7 @@ function assertFreshArchiveCommand(transfer, expectedUpdatedAt) {
 }
 
 /**
- * Latest immutable archive-history timestamp, used as the monotonic floor.
+ * Latest immutable archive-history timestamp, used as a monotonic floor.
  * @param {object} transfer
  * @returns {string|null}
  */
@@ -464,7 +466,8 @@ function archiveTransfer(id, optionsOrRequestId) {
   }
 
   const timestamp = nextTimestamp(
-    lastArchiveHistoryAt(transfer) || transfer.updatedAt
+    transfer.updatedAt,
+    lastArchiveHistoryAt(transfer)
   );
   transfer.archivedAt = timestamp;
   transfer.lastArchivedAt = timestamp;
@@ -514,7 +517,9 @@ function unarchiveTransfer(id, optionsOrRequestId) {
 
   const previousArchivedAt = transfer.archivedAt;
   const timestamp = nextTimestamp(
-    lastArchiveHistoryAt(transfer) || transfer.updatedAt || previousArchivedAt
+    transfer.updatedAt,
+    lastArchiveHistoryAt(transfer),
+    previousArchivedAt
   );
 
   transfer.archivedAt = null;
