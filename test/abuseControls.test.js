@@ -443,3 +443,56 @@ test('unsafe inbound correlation id is replaced, not echoed', async () => {
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('actual app counts parser failures in the global budget and correlates errors', async () => {
+  const config = require('../src/config');
+  const createApp = require('../src/app');
+  const originalMax = config.rateLimit.max;
+  const originalBodyLimit = config.bodyLimit;
+  const originalEnableInTest = process.env.ENABLE_RATE_LIMIT_IN_TEST;
+  let server;
+
+  try {
+    config.rateLimit.max = 2;
+    config.bodyLimit = '32b';
+    process.env.ENABLE_RATE_LIMIT_IN_TEST = '1';
+    server = http.createServer(createApp());
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const malformed = '{"amount":';
+    const oversized = JSON.stringify({ note: 'x'.repeat(64) });
+    const responses = [];
+
+    for (const [index, payload] of [malformed, oversized, malformed, oversized].entries()) {
+      const id = `parser-budget-${index}`;
+      const response = await fetch(`${base}/api/transfers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Request-Id': id },
+        body: payload,
+      });
+      responses.push({ id, response, body: await response.json() });
+    }
+
+    assert.deepEqual(responses.map(({ response }) => response.status), [400, 413, 429, 429]);
+    for (const { id, response, body } of responses) {
+      assert.equal(response.headers.get('x-request-id'), id);
+      assert.equal(response.headers.get('x-correlation-id'), id);
+      assert.equal(body.error.requestId, id);
+      assert.equal(response.headers.get('x-ratelimit-policy'), 'global');
+      if (response.status === 429) {
+        assert.ok(Number(response.headers.get('retry-after')) >= 1);
+        assert.equal(response.headers.get('x-ratelimit-remaining'), '0');
+        assert.equal(body.error.details.policy, 'global');
+      }
+    }
+  } finally {
+    config.rateLimit.max = originalMax;
+    config.bodyLimit = originalBodyLimit;
+    if (originalEnableInTest === undefined) delete process.env.ENABLE_RATE_LIMIT_IN_TEST;
+    else process.env.ENABLE_RATE_LIMIT_IN_TEST = originalEnableInTest;
+    if (server) {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+});

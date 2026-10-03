@@ -37,12 +37,6 @@ function createApp() {
   app.use(securityHeaders);
   app.use(cacheControl({ policy: config.cache.defaultPolicy }));
   app.use(cors({ origin: config.corsOrigin }));
-  app.use(express.json({ limit: config.bodyLimit }));
-  app.use(express.urlencoded({ extended: false, limit: config.bodyLimit }));
-  app.use(jsonError);
-
-  // Fail slow requests instead of hanging the connection.
-  app.use(requestTimeout({ ms: config.requestTimeoutMs }));
 
   // Assign/propagate a correlation id before logging.
   app.use(requestId);
@@ -53,7 +47,7 @@ function createApp() {
   }
   app.use(requestLogger);
 
-  // Basic abuse protection on the API surface (IP-keyed, bounded table).
+  // Apply the API budget before body parsing so invalid bodies cannot bypass it.
   app.use(
     '/api',
     rateLimit({
@@ -67,6 +61,13 @@ function createApp() {
       },
     })
   );
+
+  app.use(express.json({ limit: config.bodyLimit }));
+  app.use(express.urlencoded({ extended: false, limit: config.bodyLimit }));
+  app.use(jsonError);
+
+  // Fail slow handlers instead of hanging the connection.
+  app.use(requestTimeout({ ms: config.requestTimeoutMs }));
 
   // Block all non-health API traffic while maintenance mode is active.
   app.use(maintenanceMode);
