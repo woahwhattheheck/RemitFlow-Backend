@@ -7,6 +7,7 @@ process.env.NODE_ENV = 'test';
 
 const createApp = require('../src/app');
 const config = require('../src/config');
+const { RATES_TO_USD } = require('../src/config/rates');
 const dependencyHealth = require('../src/services/dependencyHealthService');
 
 let server;
@@ -112,6 +113,59 @@ test('readiness returns 503 when the FX dependency fails', async () => {
   const { status, body } = await fetchJson('/api/health/ready');
   assert.equal(status, 503);
   assert.equal(body.checks.fx.reason, 'FX_UNAVAILABLE');
+});
+
+test('readiness detects missing FX data and recovers when the table is restored', async () => {
+  const originalRates = { ...RATES_TO_USD };
+  const originalPair = await fetchJson('/api/rates/USD-NGN');
+  assert.equal(originalPair.status, 200);
+
+  try {
+    for (const currency of Object.keys(RATES_TO_USD)) {
+      delete RATES_TO_USD[currency];
+    }
+
+    const unavailablePair = await fetchJson('/api/rates/USD-NGN');
+    assert.equal(unavailablePair.status, 400);
+
+    const down = await fetchJson('/api/health/ready');
+    assert.equal(down.status, 503);
+    assert.equal(down.body.status, 'not_ready');
+    assert.equal(down.body.checks.fx.status, 'error');
+    assert.equal(down.body.checks.fx.reason, 'FX_UNAVAILABLE');
+    assert.equal(down.body.checks.store.status, 'ok');
+    assert.equal(down.body.checks.payments.status, 'ok');
+
+    const live = await fetchJson('/api/health/live');
+    assert.equal(live.status, 200);
+    assert.equal(live.body.status, 'alive');
+  } finally {
+    Object.assign(RATES_TO_USD, originalRates);
+  }
+
+  const recovered = await fetchJson('/api/health/ready');
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.checks.fx.status, 'ok');
+  assert.equal(recovered.body.checks.fx.reason, undefined);
+  assert.deepEqual(await fetchJson('/api/rates/USD-NGN'), originalPair);
+});
+
+test('readiness rejects unusable rates in an advertised FX corridor', async () => {
+  const originalRate = RATES_TO_USD.NGN;
+  try {
+    for (const rate of [undefined, 0, -1, NaN, Infinity]) {
+      RATES_TO_USD.NGN = rate;
+      const down = await fetchJson('/api/health/ready');
+      assert.equal(down.status, 503, `NGN rate ${String(rate)} must not be ready`);
+      assert.equal(down.body.checks.fx.reason, 'FX_UNAVAILABLE');
+    }
+  } finally {
+    RATES_TO_USD.NGN = originalRate;
+  }
+
+  const recovered = await fetchJson('/api/health/ready');
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.checks.fx.status, 'ok');
 });
 
 // ─── Liveness stays responsive during outages ────────────────────────────────

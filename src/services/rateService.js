@@ -79,13 +79,14 @@ function getPair(from, to) {
 
 /**
  * Lightweight FX probe used by readiness checks.
- * Confirms the rate table is loaded and returns at least one currency.
+ * Confirms every advertised currency has a usable rate in the loaded table.
  * @returns {{ ok: true, currencies: number }}
  */
 function ping() {
   const rates = listRates();
-  if (!Array.isArray(rates) || rates.length === 0) {
-    const err = new Error('fx rate table empty');
+  if (!Array.isArray(rates) || rates.length === 0 ||
+      rates.some(({ rateToUsd }) => !Number.isFinite(rateToUsd) || rateToUsd <= 0)) {
+    const err = new Error('fx rate table unavailable');
     err.reasonCode = 'FX_UNAVAILABLE';
     throw err;
   }
