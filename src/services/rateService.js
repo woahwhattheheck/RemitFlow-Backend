@@ -3,6 +3,7 @@
 const { RATES_TO_USD, SUPPORTED_CURRENCIES } = require('../config/rates');
 const money = require('../utils/money');
 const currency = require('../utils/currency');
+const currencyPolicy = require('../utils/currencyPolicy');
 const ApiError = require('../utils/ApiError');
 
 /**
@@ -39,10 +40,10 @@ function getRate(from, to) {
   const fromCode = currency.normalize(from);
   const toCode = currency.normalize(to);
   if (!isSupported(fromCode)) {
-    throw ApiError.badRequest(`Unsupported source currency: ${from}`);
+    throw ApiError.badRequest(`Unsupported source currency: ${currencyPolicy.describeCurrency(from)}`);
   }
   if (!isSupported(toCode)) {
-    throw ApiError.badRequest(`Unsupported target currency: ${to}`);
+    throw ApiError.badRequest(`Unsupported target currency: ${currencyPolicy.describeCurrency(to)}`);
   }
   // Convert source -> USD -> target.
   return RATES_TO_USD[fromCode] / RATES_TO_USD[toCode];
@@ -57,7 +58,6 @@ function getRate(from, to) {
  */
 function convert(amount, from, to) {
   const rate = getRate(from, to);
-  const currencyPolicy = require('../utils/currencyPolicy');
   const toCode = currency.normalize(to);
   return currencyPolicy.roundToCurrency(amount * rate, toCode);
 }

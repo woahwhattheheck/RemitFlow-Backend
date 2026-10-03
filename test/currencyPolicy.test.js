@@ -7,6 +7,7 @@ process.env.NODE_ENV = 'test';
 
 const currencyPolicy = require('../src/utils/currencyPolicy');
 const quoteService = require('../src/services/quoteService');
+const rateService = require('../src/services/rateService');
 const stellarService = require('../src/services/stellarService');
 const auditService = require('../src/services/auditService');
 const { validateCreateTransfer } = require('../src/validators/transferValidator');
@@ -35,6 +36,41 @@ test('canonicalizeAmount rejects unsupported currency before mutation', () => {
   const result = currencyPolicy.canonicalizeAmount(10, 'ZZZ');
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => /Unsupported currency/i.test(e)));
+});
+
+test('policy rejects structured amounts without invoking conversion properties', () => {
+  for (const amount of [{ toString: null }, { valueOf: false, toString: [] }, [{ toString: 0 }]]) {
+    const canonical = currencyPolicy.canonicalizeAmount(amount, 'USD');
+    assert.equal(canonical.ok, false);
+    assert.deepEqual(canonical.errors, ['amount must be a positive number']);
+    for (const from of [undefined, 'ZZZ']) {
+      const errors = currencyPolicy.validateTransferPair(amount, from, 'EUR');
+      assert.equal(errors.length, 2);
+      assert.ok(errors.includes('amount must be a positive number'));
+    }
+  }
+});
+
+test('structured currency codes produce policy errors and service 400s without coercion', () => {
+  for (const code of [{ toString: null }, { valueOf: false, toString: [] }, [{ toString: 0 }]]) {
+    assert.equal(currencyPolicy.isSupported(code), false);
+    assert.throws(() => currencyPolicy.getMeta(code), (err) => err.code === 'UNSUPPORTED_CURRENCY');
+    assert.equal(currencyPolicy.canonicalizeAmount(100, code).ok, false);
+    assert.deepEqual(currencyPolicy.validateTransferPair(100, code, 'EUR'), [
+      'Unsupported source currency: (invalid type)',
+    ]);
+    assert.deepEqual(currencyPolicy.validateTransferPair(100, 'USD', code), [
+      'Unsupported target currency: (invalid type)',
+    ]);
+    for (const getQuote of [
+      () => quoteService.getQuote(100, code, 'EUR'),
+      () => quoteService.getQuote(100, 'USD', code),
+      () => rateService.getRate(code, 'EUR'),
+      () => rateService.getRate('USD', code),
+    ]) {
+      assert.throws(getQuote, (err) => err.statusCode === 400 && /Unsupported/.test(err.message));
+    }
+  }
 });
 
 test('canonicalizeAmount rejects sub-minor-unit precision for USD', () => {
@@ -187,6 +223,69 @@ async function fetchJson(path, options = {}) {
   const body = await res.json();
   return { status: res.status, body };
 }
+
+for (const field of ['amount', 'from', 'to']) {
+  test(`HTTP ${field} objects return 400 before effects and leave the request key reusable`, async (t) => {
+    const submitPayment = t.mock.method(stellarService, 'submitPayment');
+    const valid = { senderName: 'Alice', recipientName: 'Bob', amount: 100, from: 'USD', to: 'EUR' };
+    const post = (body) => fetchJson('/api/transfers', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token-admin',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `idem-currency-typed-${field}`,
+      },
+      body: JSON.stringify(body),
+    });
+    for (const value of [{ toString: null }, { valueOf: false, toString: [] }, [{ toString: 0 }]]) {
+      const rejected = await post({ ...valid, [field]: value });
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.body.error.message, 'Validation failed');
+      assert.ok(rejected.body.error.details.errors.length > 0);
+    }
+    const query = new URLSearchParams({ amount: '100', from: 'USD', to: 'EUR' });
+    query.delete(field);
+    query.set(`${field}[toString]`, 'not-callable');
+    const quote = await fetchJson(`/api/quote?${query}`);
+    assert.equal(quote.status, 400);
+    assert.equal(quote.body.error.message, 'Validation failed');
+    assert.ok(quote.body.error.details.errors.length > 0);
+    assert.equal(submitPayment.mock.callCount(), 0);
+    assert.equal(store.transfers.size, 0);
+    assert.equal(store.transferIndex.size, 0);
+    assert.equal(auditService.countEntries(), 0);
+    assert.equal(store.idempotency.size, 0);
+
+    const preview = await fetchJson('/api/quote?amount=100&from=USD&to=EUR');
+    const recovered = await post(valid);
+    assert.equal(preview.status, 200);
+    assert.equal(recovered.status, 201);
+    assert.equal(recovered.body.sendAmount, preview.body.sendAmount);
+    assert.equal(recovered.body.receiveAmount, preview.body.receiveAmount);
+    assert.equal(submitPayment.mock.callCount(), 1);
+    assert.equal(store.transfers.size, 1);
+    assert.equal(store.idempotency.size, 1);
+  });
+}
+
+test('invalid amount with a missing or unsupported source returns both HTTP validation errors', async () => {
+  for (const from of [undefined, 'ZZZ']) {
+    const response = await fetchJson('/api/transfers', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token-admin',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'idem-currency-two-errors',
+      },
+      body: JSON.stringify({ senderName: 'Alice', recipientName: 'Bob', amount: { toString: null }, from, to: 'EUR' }),
+    });
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error.details.errors.length, 2);
+    assert.ok(response.body.error.details.errors.includes('amount must be a positive number'));
+    assert.equal(store.transfers.size, 0);
+    assert.equal(store.idempotency.size, 0);
+  }
+});
 
 test('GET /api/quote rejects unsupported currency', async () => {
   const { status, body } = await fetchJson('/api/quote?amount=10&from=USD&to=ZZZ');

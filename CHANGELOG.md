@@ -60,6 +60,11 @@ When preparing a new release:
 
 ### Fixed
 
+- Structured JSON or query values for amounts and currencies now produce
+  ordinary validation errors without invoking their conversion properties.
+  Invalid input remains rejected before settlement, transfer/audit insertion,
+  or idempotency reservation; valid numeric strings and currency codes retain
+  the shared precision, fee, and payout policy.
 - Offset pagination over transfer and audit history repeated or skipped rows
   when records were written while a client was paging, because the window was
   defined by a row count rather than a position. Cursor pagination anchors to

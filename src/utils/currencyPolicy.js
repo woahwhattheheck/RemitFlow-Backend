@@ -64,6 +64,12 @@ function isSupported(code) {
   return Object.prototype.hasOwnProperty.call(CURRENCY_META, normalized);
 }
 
+/** Describe invalid input without calling user-supplied conversion properties. */
+function describeCurrency(code) {
+  if (code == null || code === '') return '(empty)';
+  return typeof code === 'string' ? code : '(invalid type)';
+}
+
 /**
  * @param {*} code
  * @returns {CurrencyMeta}
@@ -72,7 +78,7 @@ function getMeta(code) {
   const normalized = currency.normalize(code);
   const meta = CURRENCY_META[normalized];
   if (!meta) {
-    const err = new Error(`Unsupported currency: ${code == null || code === '' ? '(empty)' : code}`);
+    const err = new Error(`Unsupported currency: ${describeCurrency(code)}`);
     err.code = 'UNSUPPORTED_CURRENCY';
     err.currency = code;
     throw err;
@@ -113,6 +119,11 @@ function roundToCurrency(amount, code) {
   return Math.round((Number(amount) + Number.EPSILON) * factor) / factor;
 }
 
+/** Amount input is numeric or textual; objects and arrays are never coerced. */
+function parseAmountNumber(amount) {
+  return typeof amount === 'number' || typeof amount === 'string' ? Number(amount) : NaN;
+}
+
 /**
  * Validate and canonicalize a send amount for a currency.
  * Returns `{ ok: true, amount, currency, meta }` or `{ ok: false, errors }`.
@@ -135,7 +146,7 @@ function canonicalizeAmount(amount, code, options = {}) {
   try {
     meta = getMeta(code);
   } catch (err) {
-    errors.push(`Unsupported currency: ${code}`);
+    errors.push(`Unsupported currency: ${describeCurrency(code)}`);
     return { ok: false, errors };
   }
 
@@ -144,7 +155,7 @@ function canonicalizeAmount(amount, code, options = {}) {
     return { ok: false, errors };
   }
 
-  const n = Number(amount);
+  const n = parseAmountNumber(amount);
   if (!Number.isFinite(n) || n <= 0) {
     errors.push('amount must be a positive number');
     return { ok: false, errors };
@@ -216,13 +227,13 @@ function validateTransferPair(amount, from, to, options = {}) {
   if (!from) {
     errors.push('from currency is required');
   } else if (!isSupported(from)) {
-    errors.push(`Unsupported source currency: ${from}`);
+    errors.push(`Unsupported source currency: ${describeCurrency(from)}`);
   }
 
   if (!to) {
     errors.push('to currency is required');
   } else if (!isSupported(to)) {
-    errors.push(`Unsupported target currency: ${to}`);
+    errors.push(`Unsupported target currency: ${describeCurrency(to)}`);
   }
 
   if (from && to && currency.normalize(from) && currency.normalize(to)
@@ -253,13 +264,10 @@ function validateTransferPair(amount, from, to, options = {}) {
     }
   } else if (amount === undefined || amount === null || amount === '') {
     errors.push(`${amountLabel} is required`);
-  } else if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+  } else if (!Number.isFinite(parseAmountNumber(amount)) || parseAmountNumber(amount) <= 0) {
     // Surface a basic amount error even when the currency is missing so the
     // client learns both problems in one round-trip.
-    const n = Number(amount);
-    if (!Number.isFinite(n) || n <= 0) {
-      errors.push(`${amountLabel} must be a positive number`);
-    }
+    errors.push(`${amountLabel} must be a positive number`);
   }
 
   return errors;
@@ -268,6 +276,7 @@ function validateTransferPair(amount, from, to, options = {}) {
 module.exports = {
   CURRENCY_META,
   isSupported,
+  describeCurrency,
   getMeta,
   effectiveMax,
   maxSafeMagnitude,

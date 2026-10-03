@@ -50,7 +50,7 @@ function getQuote(amount, from, to) {
   }
 
   if (!currencyPolicy.isSupported(to)) {
-    throw ApiError.badRequest(`Unsupported target currency: ${to}`);
+    throw ApiError.badRequest(`Unsupported target currency: ${currencyPolicy.describeCurrency(to)}`);
   }
 
   const fromCode = canonical.currency;
