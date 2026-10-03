@@ -436,12 +436,15 @@ const BULK_ACTIONS = Object.freeze({
  */
 function bulkMutate(action, ids, requestId, auth) {
   assertScopes(auth, SCOPES.TRANSFERS_WRITE);
-  const handler = BULK_ACTIONS[action];
-  if (!handler) {
+  if (typeof action !== 'string') {
+    throw ApiError.badRequest('action must be a string');
+  }
+  if (!Object.hasOwn(BULK_ACTIONS, action)) {
     throw ApiError.badRequest(`Unsupported bulk action: ${action}`, {
       allowed: Object.keys(BULK_ACTIONS),
     });
   }
+  const handler = BULK_ACTIONS[action];
   const normalised = normaliseBulkIds(ids);
   const results = normalised.map((id) => {
     try {

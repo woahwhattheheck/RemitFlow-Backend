@@ -205,6 +205,47 @@ test('bulk route requires transfers:write', async () => {
   assert.equal(status, 403);
 });
 
+for (const [index, action] of [
+  'constructor',
+  'toString',
+  '__proto__',
+  ['cancel'],
+  { toString: null },
+].entries()) {
+  test(`bulk route rejects action ${JSON.stringify(action)} without mutation`, async () => {
+    const transfer = await createTransfer('test-token-transfers', `bulk-invalid-${index}`);
+    const { status, body } = await fetchJson('/api/transfers/bulk', {
+      method: 'POST',
+      headers: { ...authHeader('test-token-transfers'), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ids: [transfer.id] }),
+    });
+    assert.equal(status, 400, JSON.stringify(body));
+    assert.equal(body.error.status, 400);
+
+    const current = await fetchJson(`/api/transfers/${transfer.id}`, {
+      headers: authHeader('test-token-transfers'),
+    });
+    assert.equal(current.status, 200);
+    assert.deepEqual(current.body, transfer);
+  });
+}
+
+test('bulk route preserves documented archive, unarchive and cancel actions', async () => {
+  const transfer = await createTransfer('test-token-transfers', 'bulk-valid-actions');
+  for (const action of ['archive', 'unarchive', 'cancel']) {
+    const { status, body } = await fetchJson('/api/transfers/bulk', {
+      method: 'POST',
+      headers: { ...authHeader('test-token-transfers'), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ids: [transfer.id] }),
+    });
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.results[0].ok, true);
+    assert.equal(body.results[0].transfer.id, transfer.id);
+    assert.equal(body.results[0].transfer.status, action === 'cancel' ? 'cancelled' : 'pending');
+    assert.equal(Boolean(body.results[0].transfer.archivedAt), action === 'archive');
+  }
+});
+
 test('bulk route claims and cancels with non-enumerating per-id errors', async () => {
   const a = await createTransfer('test-token-transfers', 'bulk-a');
   const b = await createTransfer('test-token-transfers', 'bulk-b');
