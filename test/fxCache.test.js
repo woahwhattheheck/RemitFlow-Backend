@@ -3,7 +3,7 @@
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { reset } = require('../src/store');
+const { store, reset } = require('../src/store');
 const config = require('../src/config');
 const fxCacheService = require('../src/services/fxCacheService');
 const fxProviders = require('../src/services/fxProviders');
@@ -141,6 +141,166 @@ test('fallback order is primary-then-fallback (deterministic)', () => {
   const snapshot = fxCacheService.getSnapshot({ now: 6_000_000 });
   assert.deepEqual(seen, ['primary', 'fallback']);
   assert.equal(snapshot.providerId, 'fallback');
+});
+
+test('new provider snapshots obey the requested TTL and grace boundaries before caching', () => {
+  const now = 6_100_000;
+  for (const policy of ['reject_stale', 'allow_stale']) {
+    for (const ageMs of [999, 1_000, 5_999, 6_000]) {
+      fxCacheService.reset();
+      fxProviders.setProviders([{
+        id: 'primary',
+        fetch: () => ({ ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs }),
+      }]);
+      const usable = ageMs < 1_000 || (policy === 'allow_stale' && ageMs < 6_000);
+      if (!usable) {
+        assert.throws(
+          () => fxCacheService.getSnapshot({ now, policy }),
+          (err) => err instanceof ApiError && err.statusCode === 503 &&
+            err.details.code === 'FX_PROVIDERS_DOWN',
+          `${policy}, age ${ageMs}`
+        );
+        assert.equal(fxCacheService.peek(now), null);
+        continue;
+      }
+      const snapshot = fxCacheService.getSnapshot({ now, policy });
+      assert.equal(snapshot.status, ageMs < 1_000 ? 'fresh' : 'stale');
+      assert.equal(snapshot.stale, ageMs >= 1_000);
+      assert.equal(snapshot.fetchedAt, now - ageMs);
+      assert.equal(snapshot.ageMs, ageMs);
+      assert.equal(snapshot.cacheHit, false);
+      assert.equal(fxCacheService.peek(now).fetchedAt, now - ageMs);
+    }
+  }
+});
+
+test('invalid provider timestamps cannot win over a usable fallback', () => {
+  const now = 6_200_000;
+  for (const fetchedAt of [NaN, Infinity, -Infinity, String(now)]) {
+    fxCacheService.reset();
+    const attempted = [];
+    fxProviders.setProviders([
+      {
+        id: 'primary',
+        fetch: () => {
+          attempted.push('primary');
+          return { ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt };
+        },
+      },
+      {
+        id: 'fallback',
+        fetch: () => {
+          attempted.push('fallback');
+          return { ratesToUsd: { USD: 1, EUR: 1.1 }, fetchedAt: now };
+        },
+      },
+    ]);
+    const snapshot = fxCacheService.getSnapshot({ now, policy: 'allow_stale' });
+    assert.deepEqual(attempted, ['primary', 'fallback']);
+    assert.equal(snapshot.providerId, 'fallback');
+    assert.equal(snapshot.status, 'fresh');
+    assert.equal(snapshot.ratesToUsd.EUR, 1.1);
+  }
+});
+
+test('fallback order skips responses outside policy and stops at the first usable snapshot', () => {
+  const now = 6_300_000;
+  for (const policy of ['reject_stale', 'allow_stale']) {
+    fxCacheService.reset();
+    const attempted = [];
+    fxProviders.setProviders([
+      { id: 'expired', ageMs: 6_000 },
+      { id: 'stale', ageMs: 1_000 },
+      { id: 'fresh', ageMs: 0 },
+      { id: 'unused', ageMs: 0 },
+    ].map(({ id, ageMs }) => ({
+      id,
+      fetch: () => {
+        attempted.push(id);
+        return { ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs };
+      },
+    })));
+    const snapshot = fxCacheService.getSnapshot({ now, policy });
+    const allowsStale = policy === 'allow_stale';
+    assert.deepEqual(attempted, allowsStale ? ['expired', 'stale'] : ['expired', 'stale', 'fresh']);
+    assert.equal(snapshot.providerId, allowsStale ? 'stale' : 'fresh');
+    assert.equal(snapshot.stale, allowsStale);
+    assert.equal(fxCacheService.getProviderFetchCount(), 1);
+  }
+});
+
+test('unusable provider responses preserve a cached display snapshot only within its grace', () => {
+  const now = 6_400_000;
+  const fetchedAt = now - 1_500;
+  fxCacheService.seed({ fetchedAt, providerId: 'cached' });
+  fxProviders.setProviders([{
+    id: 'expired',
+    fetch: () => ({ ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - 6_000 }),
+  }]);
+  assert.throws(
+    () => fxCacheService.getSnapshot({ now, policy: 'reject_stale' }),
+    (err) => err instanceof ApiError && err.details.code === 'FX_PROVIDERS_DOWN'
+  );
+  const displayed = fxCacheService.getSnapshot({ now, policy: 'allow_stale' });
+  assert.equal(displayed.providerId, 'cached');
+  assert.equal(displayed.fetchedAt, fetchedAt);
+  assert.equal(displayed.stale, true);
+  assert.equal(displayed.source, 'cache-stale-outage');
+  assert.throws(
+    () => fxCacheService.getSnapshot({ now: fetchedAt + 6_000, policy: 'allow_stale' }),
+    (err) => err instanceof ApiError && err.details.code === 'FX_PROVIDERS_DOWN'
+  );
+  assert.equal(fxCacheService.peek(now).fetchedAt, fetchedAt);
+});
+
+test('HTTP transfer rejects newly fetched stale rates without reserving a quote or retry key', async () => {
+  const createApp = require('../src/app');
+  const originalTokens = config.apiTokens;
+  config.apiTokens = { 'fx-http-regression': ['transfers:write'] };
+  const server = createApp().listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  const post = () => fetch(`http://127.0.0.1:${server.address().port}/api/transfers`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer fx-http-regression',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'fx-policy-retry',
+    },
+    body: JSON.stringify(PAYLOAD),
+  });
+  try {
+    for (const ageMs of [1_000, 6_000]) {
+      reset();
+      fxProviders.setProviders([{
+        id: 'primary',
+        fetch: ({ now }) => ({ ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs }),
+      }]);
+      const rejected = await post();
+      const failure = await rejected.json();
+      assert.equal(rejected.status, 503);
+      assert.equal(failure.error.details.code, 'FX_PROVIDERS_DOWN');
+      assert.equal(store.transfers.size, 0);
+      assert.equal(store.quotes.size, 0);
+      assert.equal(store.idempotency.size, 0);
+      assert.equal(fxCacheService.peek(), null);
+
+      fxProviders.resetProviders();
+      const recovered = await post();
+      const transfer = await recovered.json();
+      assert.equal(recovered.status, 201);
+      assert.equal(transfer.rateStale, false);
+      assert.equal(transfer.rateProvider, 'primary');
+      assert.equal(store.transfers.size, 1);
+      assert.equal(store.quotes.size, 1);
+      assert.equal(store.idempotency.size, 1);
+    }
+  } finally {
+    config.apiTokens = originalTokens;
+    await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  }
 });
 
 // ---------------------------------------------------------------------------

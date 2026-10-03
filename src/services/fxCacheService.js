@@ -72,12 +72,25 @@ function decorate(entry, now, extra) {
 }
 
 /**
- * Pull from providers (counted), store under TTL, return decorated fresh snapshot.
+ * Pull from providers (counted), accepting only snapshots within policy before
+ * choosing a provider or replacing the cache. A successful fetch is not proof
+ * that the provider's timestamp is current.
  * @param {number} now
+ * @param {'reject_stale'|'allow_stale'} policy
  */
-function refresh(now) {
+function refresh(now, policy) {
   providerFetchCount += 1;
-  const snapshot = fxProviders.fetchWithFallback({ now });
+  const snapshot = fxProviders.fetchWithFallback({
+    now,
+    acceptSnapshot(candidate) {
+      const expiresAt = candidate.fetchedAt + ttlMs();
+      if (!Number.isFinite(candidate.fetchedAt) || !Number.isFinite(expiresAt)) {
+        return false;
+      }
+      const status = classify({ expiresAt }, now);
+      return status === 'fresh' || (policy === 'allow_stale' && status === 'stale');
+    },
+  });
   const entry = {
     ratesToUsd: { ...snapshot.ratesToUsd },
     fetchedAt: snapshot.fetchedAt,
@@ -128,7 +141,7 @@ function getSnapshot(opts = {}) {
 
   inflight.add(CACHE_KEY);
   try {
-    return refresh(now);
+    return refresh(now, policy);
   } catch (err) {
     // Provider path failed. Under allow_stale, a within-grace entry is still
     // usable for display — but it is visibly stale. Under reject_stale we

@@ -63,6 +63,13 @@ When preparing a new release:
 
 ### Fixed
 
+- Successful provider responses now pass the requested FX freshness policy before
+  they can win fallback selection or replace the cache. Transfers reject a
+  newly fetched stale snapshot, including at the TTL boundary, while display
+  requests may use visibly stale rates strictly within grace. Expired or invalid
+  timestamps advance to the next provider; an unusable refresh preserves an
+  existing within-grace display snapshot. Provider timestamps are not renewed
+  merely because a fetch succeeded.
 - Offset pagination over transfer and audit history repeated or skipped rows
   when records were written while a client was paging, because the window was
   defined by a row count rather than a position. Cursor pagination anchors to

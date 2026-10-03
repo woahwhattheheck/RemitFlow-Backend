@@ -63,7 +63,7 @@ function fallbackFetch(opts = {}) {
 primaryFetch._down = false;
 fallbackFetch._down = false;
 
-/** Ordered registry. First success wins; order is the fallback contract. */
+/** Ordered registry. First usable success wins; order is the fallback contract. */
 const DEFAULT_PROVIDERS = [
   { id: 'primary', fetch: primaryFetch },
   { id: 'fallback', fetch: fallbackFetch },
@@ -85,8 +85,10 @@ function listProviders() {
 }
 
 /**
- * Walk providers in order until one returns a snapshot.
- * @param {{ now?: number }} [opts]
+ * Walk providers in order until one returns a snapshot accepted by the caller.
+ * A response outside the caller's freshness policy is a failed attempt, so it
+ * cannot hide a usable response from a later provider.
+ * @param {{ now?: number, acceptSnapshot?: (snapshot: FxSnapshot) => boolean }} [opts]
  * @returns {FxSnapshot}
  * @throws {ApiError} 503 when every provider fails.
  */
@@ -98,11 +100,15 @@ function fetchWithFallback(opts = {}) {
       if (!snapshot || typeof snapshot.ratesToUsd !== 'object') {
         throw new Error(`Provider ${provider.id} returned an invalid snapshot`);
       }
-      return {
+      const normalized = {
         providerId: snapshot.providerId || provider.id,
         ratesToUsd: { ...snapshot.ratesToUsd },
         fetchedAt: snapshot.fetchedAt != null ? snapshot.fetchedAt : (opts.now != null ? opts.now : Date.now()),
       };
+      if (opts.acceptSnapshot && !opts.acceptSnapshot(normalized)) {
+        throw new Error(`Provider ${provider.id} returned a snapshot outside the requested freshness policy`);
+      }
+      return normalized;
     } catch (err) {
       errors.push({
         providerId: provider.id,
