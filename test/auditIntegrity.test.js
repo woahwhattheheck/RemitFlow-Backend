@@ -126,6 +126,48 @@ test('REGRESSION: silent field edit on an audit record is detectable', () => {
   assert.match(report.reason, /entryHash mismatch/);
 });
 
+for (const [field, value] of [
+  ['resourceId', 'txn-reassigned'],
+  ['requestId', 'req-reassigned'],
+  ['payload', { sendAmount: 999999 }],
+]) {
+  test(`integrity endpoint detects a reassigned ${field} compatibility alias`, async () => {
+    const entry = auditService.addEntry({
+      action: 'transfer.created',
+      resourceId: 'txn-alias',
+      requestId: 'req-alias',
+      payload: { sendAmount: 10 },
+    });
+    const originalHash = entry.entryHash;
+    entry[field] = value;
+
+    const listing = await fetchJson('/api/audit', { headers: auth('test-token-admin') });
+    assert.equal(listing.status, 200);
+    assert.deepEqual(listing.body.entries[0][field], value);
+
+    const report = await fetchJson('/api/audit/integrity', { headers: auth('test-token-admin') });
+    assert.equal(report.status, 200);
+    assert.equal(report.body.valid, false);
+    assert.equal(report.body.brokenAt, entry.chainSeq);
+    assert.match(report.body.reason, /compatibility alias mismatch/);
+    assert.equal(entry.entryHash, originalHash);
+  });
+}
+
+test('equivalent payload copies retain the existing hash and valid integrity', () => {
+  const entry = auditService.addEntry({
+    action: 'transfer.created',
+    resourceId: 'txn-alias-copy',
+    payload: { sendAmount: 10, currency: 'USD' },
+  });
+  const originalHash = entry.entryHash;
+  entry.payload = { currency: 'USD', sendAmount: 10 };
+
+  assert.notEqual(entry.payload, entry.changes);
+  assert.equal(computeEntryHash(entry, entry.prevHash), originalHash);
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
+
 test('REGRESSION: broken predecessor link is detectable', () => {
   auditService.addEntry({
     action: 'transfer.created',

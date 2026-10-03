@@ -6,6 +6,7 @@ const config = require('../config');
 const {
   GENESIS_HASH,
   actorRef,
+  canonicalize,
   computeEntryHash,
   redact,
   scopeFromAction,
@@ -212,6 +213,21 @@ function verifyIntegrity() {
         tipHash,
         brokenAt: i,
         reason: `entryHash mismatch at chainSeq ${entry.chainSeq}`,
+      };
+    }
+
+    // Legacy consumers read these aliases, while the hash binds the canonical
+    // fields. Verify their values without changing the stored hash format.
+    if (entry.resourceId !== entry.target
+      || entry.requestId !== entry.correlationId
+      || (entry.payload !== entry.changes
+        && canonicalize(entry.payload) !== canonicalize(entry.changes))) {
+      return {
+        valid: false,
+        checked: i,
+        tipHash,
+        brokenAt: i,
+        reason: `compatibility alias mismatch at chainSeq ${entry.chainSeq}`,
       };
     }
 
