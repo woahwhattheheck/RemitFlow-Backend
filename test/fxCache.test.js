@@ -236,6 +236,76 @@ test('quotes expose identity and freshness metadata', () => {
   assert.equal(typeof quote.quoteExpiresAt, 'string');
 });
 
+test('a fresh quote becomes unusable at FX expiry before its quote TTL', () => {
+  const now = 9_000_000;
+  const quote = quoteService.getQuote(100, 'USD', 'EUR', { now });
+  const data = { ...PAYLOAD, quoteId: quote.quoteId };
+  const fresh = quoteService.resolveForTransfer(data, {
+    now: now + config.fx.cacheTtlMs - 1,
+  });
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.freshness.ageMs, config.fx.cacheTtlMs - 1);
+
+  assert.throws(
+    () => quoteService.resolveForTransfer(data, { now: now + config.fx.cacheTtlMs }),
+    (err) => err instanceof ApiError && err.statusCode === 409 &&
+      err.details.code === 'QUOTE_STALE' &&
+      err.details.freshness.status === 'stale' &&
+      err.details.freshness.ageMs === config.fx.cacheTtlMs
+  );
+  // Binding must preserve the quote the sender saw, not silently fetch/reprice.
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+});
+
+test('explicit stale transfer policy returns current freshness with unchanged quote terms', () => {
+  const now = 9_100_000;
+  const quote = quoteService.getQuote(100, 'USD', 'EUR', { now });
+  config.fx.allowStaleForTransfers = true;
+  const bound = quoteService.resolveForTransfer({ ...PAYLOAD, quoteId: quote.quoteId }, {
+    now: now + config.fx.cacheTtlMs,
+  });
+  assert.equal(bound.stale, true);
+  assert.equal(bound.freshness.stale, true);
+  assert.equal(bound.freshness.status, 'stale');
+  assert.equal(bound.freshness.ageMs, config.fx.cacheTtlMs);
+  for (const field of ['quoteId', 'quoteVersion', 'rate', 'receiveAmount', 'quoteExpiresAt']) {
+    assert.equal(bound[field], quote[field]);
+  }
+  assert.equal(quoteService.getQuoteById(quote.quoteId).stale, false);
+});
+
+test('stale transfer opt-in cannot extend FX grace or quote TTL boundaries', () => {
+  const now = 9_200_000;
+  config.fx.quoteTtlMs = 10_000;
+  config.fx.allowStaleForTransfers = true;
+  const quote = quoteService.getQuote(100, 'USD', 'EUR', { now });
+  const data = { ...PAYLOAD, quoteId: quote.quoteId };
+  assert.throws(
+    () => quoteService.resolveForTransfer(data, {
+      now: now + config.fx.cacheTtlMs + config.fx.staleGraceMs,
+    }),
+    (err) => err instanceof ApiError && err.details.code === 'QUOTE_STALE' &&
+      err.details.freshness.status === 'expired'
+  );
+  assert.throws(
+    () => quoteService.resolveForTransfer(data, { now: now + config.fx.quoteTtlMs }),
+    (err) => err instanceof ApiError && err.details.code === 'QUOTE_EXPIRED'
+  );
+});
+
+test('display policy reclassifies an issued quote without changing its stored terms', () => {
+  const now = 9_300_000;
+  const quote = quoteService.getQuote(100, 'USD', 'EUR', { now });
+  const displayed = quoteService.assertUsable(quote, {
+    now: now + config.fx.cacheTtlMs,
+    policy: 'allow_stale',
+  });
+  assert.equal(displayed.stale, true);
+  assert.equal(displayed.freshness.status, 'stale');
+  assert.equal(displayed.rate, quote.rate);
+  assert.equal(quote.stale, false);
+});
+
 test('stale quote is visible but cannot be used for transfer pricing', () => {
   // Use wall-clock time so transfer creation (which reads Date.now) and the
   // quote TTL share the same clock. Only the FX snapshot is forced stale.

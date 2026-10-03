@@ -2,6 +2,7 @@
 
 const config = require('../config');
 const rateService = require('./rateService');
+const fxCacheService = require('./fxCacheService');
 const money = require('../utils/money');
 const currency = require('../utils/currency');
 const ApiError = require('../utils/ApiError');
@@ -178,27 +179,50 @@ function getQuoteById(quoteId) {
   return quote;
 }
 
+/** Reclassify the bound snapshot without changing the stored quote's terms. */
+function withCurrentFreshness(quote, now) {
+  const freshness = quote.freshness || {};
+  const fetchedAt = Date.parse(freshness.fetchedAt);
+  const status = fxCacheService.classify({
+    expiresAt: Date.parse(freshness.expiresAt),
+  }, now);
+  const stale = Boolean(quote.stale || freshness.stale || status !== 'fresh');
+
+  return {
+    ...quote,
+    stale,
+    freshness: {
+      ...freshness,
+      status: status === 'fresh' && stale ? 'stale' : status,
+      stale,
+      ageMs: Number.isFinite(fetchedAt) ? Math.max(0, now - fetchedAt) : freshness.ageMs,
+    },
+  };
+}
+
 /**
  * Decide whether a quote may be used under a named policy.
  *
  * - Quote TTL expiry always blocks transfer use (the sender must refresh).
- * - Underlying FX `stale` blocks transfer use unless allowStaleForTransfers.
+ * - FX freshness is re-evaluated at use time, not fixed at quote issuance.
+ * - Stale FX blocks transfer use unless allowStaleForTransfers, within grace.
  * - Display policy never throws for staleness; callers still see `stale: true`.
  *
  * @param {object} quote
  * @param {object} [opts]
  * @param {number} [opts.now]
  * @param {'reject_stale'|'allow_stale'} [opts.policy]
- * @returns {object} the same quote when usable
+ * @returns {object} the quote's original terms with current freshness metadata
  */
 function assertUsable(quote, opts = {}) {
   const now = opts.now != null ? opts.now : Date.now();
   const policy = opts.policy || 'reject_stale';
   const expiresAtMs = Date.parse(quote.quoteExpiresAt);
+  const current = withCurrentFreshness(quote, now);
 
-  if (!Number.isFinite(expiresAtMs) || now > expiresAtMs) {
+  if (!Number.isFinite(expiresAtMs) || now >= expiresAtMs) {
     if (policy === 'allow_stale') {
-      return quote;
+      return current;
     }
     throw ApiError.conflict('Quote has expired; request a fresh quote', {
       code: 'QUOTE_EXPIRED',
@@ -208,9 +232,10 @@ function assertUsable(quote, opts = {}) {
     });
   }
 
-  if (quote.stale || (quote.freshness && quote.freshness.stale)) {
+  if (current.stale) {
     const allow =
-      policy === 'allow_stale' || config.fx.allowStaleForTransfers === true;
+      policy === 'allow_stale' ||
+      (config.fx.allowStaleForTransfers === true && current.freshness.status === 'stale');
     if (!allow) {
       throw ApiError.conflict(
         'Quote is based on a stale FX rate and cannot be used for transfer pricing',
@@ -218,13 +243,13 @@ function assertUsable(quote, opts = {}) {
           code: 'QUOTE_STALE',
           quoteId: quote.quoteId,
           quoteVersion: quote.quoteVersion,
-          freshness: quote.freshness,
+          freshness: current.freshness,
         }
       );
     }
   }
 
-  return quote;
+  return current;
 }
 
 /**
@@ -246,8 +271,10 @@ function resolveForTransfer(data, opts = {}) {
   const now = opts.now != null ? opts.now : Date.now();
 
   if (data.quoteId) {
-    const quote = getQuoteById(data.quoteId);
-    assertUsable(quote, { now, policy: 'reject_stale' });
+    const quote = assertUsable(getQuoteById(data.quoteId), {
+      now,
+      policy: 'reject_stale',
+    });
 
     const fromCode = currency.normalize(data.from);
     const toCode = currency.normalize(data.to);
