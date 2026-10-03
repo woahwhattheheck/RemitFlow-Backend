@@ -85,9 +85,9 @@ function listProviders() {
 }
 
 /**
- * Walk providers in order until one returns a snapshot accepted by the caller.
- * A response outside the caller's freshness policy is a failed attempt, so it
- * cannot hide a usable response from a later provider.
+ * Walk providers in order until one returns valid rates accepted by the caller.
+ * Malformed rates or a response outside the caller's freshness policy are
+ * failed attempts, so neither can hide a usable response from a later provider.
  * @param {{ now?: number, acceptSnapshot?: (snapshot: FxSnapshot) => boolean }} [opts]
  * @returns {FxSnapshot}
  * @throws {ApiError} 503 when every provider fails.
@@ -97,12 +97,18 @@ function fetchWithFallback(opts = {}) {
   for (const provider of providers) {
     try {
       const snapshot = provider.fetch(opts);
-      if (!snapshot || typeof snapshot.ratesToUsd !== 'object') {
+      const rates = snapshot && snapshot.ratesToUsd;
+      if (!rates || typeof rates !== 'object' || Array.isArray(rates)) {
         throw new Error(`Provider ${provider.id} returned an invalid snapshot`);
+      }
+      const ratesToUsd = { ...rates };
+      const values = Object.values(ratesToUsd);
+      if (values.length === 0 || values.some((rate) => !Number.isFinite(rate) || rate <= 0)) {
+        throw new Error(`Provider ${provider.id} returned invalid rates`);
       }
       const normalized = {
         providerId: snapshot.providerId || provider.id,
-        ratesToUsd: { ...snapshot.ratesToUsd },
+        ratesToUsd,
         fetchedAt: snapshot.fetchedAt != null ? snapshot.fetchedAt : (opts.now != null ? opts.now : Date.now()),
       };
       if (opts.acceptSnapshot && !opts.acceptSnapshot(normalized)) {

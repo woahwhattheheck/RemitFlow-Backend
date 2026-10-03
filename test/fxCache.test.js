@@ -203,6 +203,48 @@ test('invalid provider timestamps cannot win over a usable fallback', () => {
   }
 });
 
+test('malformed provider rates fall back before either policy can cache them', () => {
+  const now = 6_250_000;
+  const invalidMaps = [
+    null,
+    {},
+    Object.assign([], { USD: 1, EUR: 1.08 }),
+    ...[0, -0, -1, NaN, Infinity, -Infinity, '1.08', null, undefined, true]
+      .map((EUR) => ({ USD: 1, EUR })),
+    { USD: 1, EUR: 1.08, GBP: 0 },
+  ];
+  for (const policy of ['reject_stale', 'allow_stale']) {
+    for (const ratesToUsd of invalidMaps) {
+      fxCacheService.reset();
+      const attempted = [];
+      const healthyRates = { USD: 1, EUR: 1.1 };
+      fxProviders.setProviders([
+        { id: 'primary', fetch: () => {
+          attempted.push('primary');
+          return { ratesToUsd, fetchedAt: now };
+        } },
+        { id: 'fallback', fetch: () => {
+          attempted.push('fallback');
+          return { ratesToUsd: healthyRates, fetchedAt: now };
+        } },
+        { id: 'unused', fetch: () => {
+          attempted.push('unused');
+          throw new Error('unreachable provider');
+        } },
+      ]);
+      const snapshot = fxCacheService.getSnapshot({ now, policy });
+      assert.deepEqual(attempted, ['primary', 'fallback']);
+      assert.equal(snapshot.providerId, 'fallback');
+      assert.equal(snapshot.stale, false);
+      assert.deepEqual(snapshot.ratesToUsd, healthyRates);
+      assert.notEqual(snapshot.ratesToUsd, healthyRates);
+      assert.equal(fxCacheService.peek(now).providerId, 'fallback');
+      assert.deepEqual(fxCacheService.peek(now).ratesToUsd, healthyRates);
+      assert.equal(fxCacheService.getProviderFetchCount(), 1);
+    }
+  }
+});
+
 test('fallback order skips responses outside policy and stops at the first usable snapshot', () => {
   const now = 6_300_000;
   for (const policy of ['reject_stale', 'allow_stale']) {
@@ -251,6 +293,97 @@ test('unusable provider responses preserve a cached display snapshot only within
     (err) => err instanceof ApiError && err.details.code === 'FX_PROVIDERS_DOWN'
   );
   assert.equal(fxCacheService.peek(now).fetchedAt, fetchedAt);
+});
+
+test('malformed provider rates preserve a cached display snapshot only within grace', () => {
+  const now = 6_450_000;
+  const fetchedAt = now - 1_500;
+  const ratesToUsd = { USD: 1, EUR: 1.08 };
+  fxCacheService.seed({ fetchedAt, providerId: 'cached', ratesToUsd });
+  fxProviders.setProviders([
+    { id: 'primary', fetch: () => ({ ratesToUsd: { USD: 1, EUR: 0 }, fetchedAt: now }) },
+    { id: 'fallback', fetch: () => ({ ratesToUsd: { USD: 1, EUR: -1.1 }, fetchedAt: now }) },
+  ]);
+  assert.throws(
+    () => fxCacheService.getSnapshot({ now, policy: 'reject_stale' }),
+    (err) => err instanceof ApiError && err.statusCode === 503 &&
+      err.details.code === 'FX_PROVIDERS_DOWN' &&
+      err.details.attempted.map((entry) => entry.providerId).join(',') === 'primary,fallback'
+  );
+  const displayed = fxCacheService.getSnapshot({ now, policy: 'allow_stale' });
+  assert.equal(displayed.providerId, 'cached');
+  assert.equal(displayed.fetchedAt, fetchedAt);
+  assert.deepEqual(displayed.ratesToUsd, ratesToUsd);
+  assert.equal(displayed.stale, true);
+  assert.equal(displayed.source, 'cache-stale-outage');
+  assert.throws(
+    () => fxCacheService.getSnapshot({ now: fetchedAt + 6_000, policy: 'allow_stale' }),
+    (err) => err instanceof ApiError && err.details.code === 'FX_PROVIDERS_DOWN'
+  );
+  assert.equal(fxCacheService.peek(now).providerId, 'cached');
+  assert.equal(fxCacheService.peek(now).fetchedAt, fetchedAt);
+  assert.deepEqual(fxCacheService.peek(now).ratesToUsd, ratesToUsd);
+});
+
+test('HTTP invalid FX responses create no records and allow the same transfer key after recovery', async () => {
+  const createApp = require('../src/app');
+  const originalTokens = config.apiTokens;
+  config.apiTokens = { 'fx-invalid-rates-regression': ['transfers:write'] };
+  const server = createApp().listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = () => fetch(`${base}/api/transfers`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer fx-invalid-rates-regression',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'fx-invalid-rates-retry',
+    },
+    body: JSON.stringify(PAYLOAD),
+  });
+  try {
+    const attempted = [];
+    fxProviders.setProviders([
+      { id: 'primary', fetch: ({ now }) => {
+        attempted.push('primary');
+        return { ratesToUsd: { USD: 1, EUR: 0 }, fetchedAt: now };
+      } },
+      { id: 'fallback', fetch: ({ now }) => {
+        attempted.push('fallback');
+        return { ratesToUsd: { USD: 1, EUR: -1.1 }, fetchedAt: now };
+      } },
+    ]);
+    for (const request of [() => fetch(`${base}/api/quote?amount=100&from=USD&to=EUR`), post]) {
+      const rejected = await request();
+      const failure = await rejected.json();
+      assert.equal(rejected.status, 503);
+      assert.equal(failure.error.details.code, 'FX_PROVIDERS_DOWN');
+      assert.deepEqual(failure.error.details.attempted.map((entry) => entry.providerId), ['primary', 'fallback']);
+      assert.equal(store.transfers.size, 0);
+      assert.equal(store.quotes.size, 0);
+      assert.equal(store.idempotency.size, 0);
+      assert.equal(fxCacheService.peek(), null);
+    }
+    assert.deepEqual(attempted, ['primary', 'fallback', 'primary', 'fallback']);
+
+    fxProviders.resetProviders();
+    const recovered = await post();
+    const transfer = await recovered.json();
+    assert.equal(recovered.status, 201);
+    assert.equal(transfer.rateStale, false);
+    assert.equal(transfer.rateProvider, 'primary');
+    assert.equal(transfer.rate, 0.93);
+    assert.equal(transfer.receiveAmount, 90.93);
+    assert.equal(store.transfers.size, 1);
+    assert.equal(store.quotes.size, 1);
+    assert.equal(store.idempotency.size, 1);
+  } finally {
+    config.apiTokens = originalTokens;
+    await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  }
 });
 
 test('HTTP transfer rejects newly fetched stale rates without reserving a quote or retry key', async () => {

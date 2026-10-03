@@ -63,6 +63,12 @@ When preparing a new release:
 
 ### Fixed
 
+- FX providers must return a nonempty rate map containing only finite, positive
+  numbers before winning fallback selection or replacing the cache. Malformed
+  primary rates advance to the next provider. With no usable provider or cached
+  snapshot, quotes and transfers fail without creating records or consuming a
+  transfer retry key. Valid partial maps and the existing within-grace stale
+  display policy remain supported.
 - Successful provider responses now pass the requested FX freshness policy before
   they can win fallback selection or replace the cache. Transfers reject a
   newly fetched stale snapshot, including at the TTL boundary, while display
