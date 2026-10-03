@@ -7,10 +7,12 @@ process.env.NODE_ENV = 'test';
 
 const currencyPolicy = require('../src/utils/currencyPolicy');
 const quoteService = require('../src/services/quoteService');
+const stellarService = require('../src/services/stellarService');
+const auditService = require('../src/services/auditService');
 const { validateCreateTransfer } = require('../src/validators/transferValidator');
 const { validateQuoteQuery } = require('../src/validators/quoteValidator');
 const createApp = require('../src/app');
-const { reset } = require('../src/store');
+const { store, reset } = require('../src/store');
 
 // ── Unit: policy table ──────────────────────────────────────────────────────
 
@@ -298,3 +300,80 @@ test('JPY quote and transfer use the fee rounded after both components are added
   assert.equal(transferRes.body.fee, 1);
   assert.equal(transferRes.body.receiveAmount, 0.19);
 });
+
+for (const [amount, correctedAmount, from, to, receiveAmount] of [
+  [0.01, 0.31, 'USD', 'EUR', 0.01],
+  [0.30, 0.31, 'USD', 'EUR', 0.01],
+  [8.11, 8.12, 'NGN', 'USD', 0.01],
+  [5.53, 5.54, 'NGN', 'JPY', 1],
+]) {
+  test(`quote and transfer reject an unpayable ${amount} ${from} to ${to} before mutation`, async (t) => {
+    // Observe the existing settlement adapter without replacing its behavior.
+    const submitPayment = t.mock.method(stellarService, 'submitPayment');
+    const createTransfer = (value) => fetchJson('/api/transfers', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token-admin',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'idem-currency-positive-payout',
+      },
+      body: JSON.stringify({
+        senderName: 'Alice', recipientName: 'Bob', amount: value, from, to,
+      }),
+    });
+
+    const quote = await fetchJson(`/api/quote?amount=${amount}&from=${from}&to=${to}`);
+    const rejected = await createTransfer(amount);
+    assert.equal(quote.status, 400);
+    assert.equal(rejected.status, 400);
+    assert.match(quote.body.error.message, /positive receive amount/i);
+    assert.equal(rejected.body.error.message, quote.body.error.message);
+    assert.equal(submitPayment.mock.callCount(), 0);
+    assert.equal(store.transfers.size, 0);
+    assert.equal(store.transferIndex.size, 0);
+    assert.equal(auditService.countEntries(), 0);
+    assert.equal(store.idempotency.size, 0);
+
+    // A corrected amount can reuse the rejected request's key. Amounts that
+    // round up to one destination minor unit remain valid.
+    const correctedQuote = await fetchJson(
+      `/api/quote?amount=${correctedAmount}&from=${from}&to=${to}`
+    );
+    const corrected = await createTransfer(correctedAmount);
+    assert.equal(correctedQuote.status, 200);
+    assert.equal(corrected.status, 201);
+    assert.equal(correctedQuote.body.receiveAmount, receiveAmount);
+    assert.equal(corrected.body.receiveAmount, correctedQuote.body.receiveAmount);
+    assert.equal(submitPayment.mock.callCount(), 1);
+    assert.equal(store.transfers.size, 1);
+    assert.equal(store.transferIndex.size, 1);
+    assert.equal(auditService.countEntries(), 1);
+    assert.equal(store.idempotency.size, 1);
+  });
+}
+
+for (const [amount, from, to, fee, receiveAmount] of [
+  [1, 'JPY', 'USD', 0, 0.01],
+  [50000, 'USD', 'NGN', 750.30, 75768769.23],
+]) {
+  test(`positive payout preserves the source amount boundary ${amount} ${from} to ${to}`, async () => {
+    const quote = await fetchJson(`/api/quote?amount=${amount}&from=${from}&to=${to}`);
+    const transfer = await fetchJson('/api/transfers', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token-admin',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'idem-currency-source-boundary',
+      },
+      body: JSON.stringify({
+        senderName: 'Alice', recipientName: 'Bob', amount, from, to,
+      }),
+    });
+    assert.equal(quote.status, 200);
+    assert.equal(transfer.status, 201);
+    assert.equal(quote.body.fee, fee);
+    assert.equal(quote.body.receiveAmount, receiveAmount);
+    assert.equal(transfer.body.sendAmount, amount);
+    assert.equal(transfer.body.receiveAmount, quote.body.receiveAmount);
+  });
+}

@@ -74,6 +74,11 @@ function getQuote(amount, from, to) {
     amountAfterFee * rate,
     toCode
   );
+  if (receiveAmount <= 0) {
+    throw ApiError.badRequest(
+      'Amount must produce a positive receive amount after fees and currency rounding'
+    );
+  }
 
   return {
     from: fromCode,
