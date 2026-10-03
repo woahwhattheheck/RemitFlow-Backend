@@ -29,6 +29,7 @@ const {
  *   id, action, scope, target, actor, correlationId, outcome, changes,
  *   resourceId / requestId / payload  — compat aliases
  *   chainSeq, prevHash, entryHash     — integrity metadata
+ *   mutationId                        — optional state-change identity
  *   at                                — ISO-8601 timestamp
  */
 
@@ -42,13 +43,14 @@ let tipHash = GENESIS_HASH;
 
 /**
  * Event identity used to suppress duplicate outcome events for the same
- * privileged mutation (e.g. a retried request carrying the same correlation id).
+ * privileged mutation. A state-change id distinguishes later mutations that
+ * share a workflow correlation id; callers without one retain replay behavior.
  * @param {object} parts
  * @returns {string|null} null when the event cannot be safely deduplicated.
  */
-function eventIdentity({ action, target, correlationId, outcome }) {
-  if (!correlationId) return null;
-  return `${action}\u0000${target}\u0000${correlationId}\u0000${outcome}`;
+function eventIdentity({ action, target, actor, scope, correlationId, outcome, mutationId }) {
+  if (!correlationId && !mutationId) return null;
+  return JSON.stringify([action, target, actor, scope, correlationId, outcome, mutationId]);
 }
 
 /** @type {Map<string, object>} */
@@ -66,6 +68,7 @@ const eventsByIdentity = new Map();
  * @param {object} [params.changes]
  * @param {string} [params.requestId]  - legacy alias for correlationId
  * @param {string} [params.correlationId]
+ * @param {string} [params.mutationId] - stable id of the recorded state change
  * @param {string} [params.actor]      - raw token or already-fingerprinted ref
  * @param {string} [params.scope]
  * @param {'success'|'failure'|string} [params.outcome]
@@ -79,6 +82,7 @@ function addEntry({
   changes,
   requestId,
   correlationId,
+  mutationId,
   actor,
   scope,
   outcome = 'success',
@@ -94,18 +98,9 @@ function addEntry({
     ? String(correlationId)
     : (requestId != null && requestId !== '' ? String(requestId) : null);
 
-  const resolvedOutcome = outcome || 'success';
-  const identity = eventIdentity({
-    action,
-    target: resolvedTarget,
-    correlationId: resolvedCorrelation,
-    outcome: resolvedOutcome,
-  });
-
-  if (identity) {
-    const existing = eventsByIdentity.get(identity);
-    if (existing) return existing;
-  }
+  const resolvedMutationId = mutationId != null && mutationId !== ''
+    ? String(mutationId)
+    : undefined;
 
   // Accept either a raw token (fingerprinted here) or a precomputed `actor:…` ref.
   let resolvedActor;
@@ -118,6 +113,22 @@ function addEntry({
   }
 
   const resolvedScope = scope || scopeFromAction(action);
+  const resolvedOutcome = outcome || 'success';
+  const identity = eventIdentity({
+    action,
+    target: resolvedTarget,
+    actor: resolvedActor,
+    scope: resolvedScope,
+    correlationId: resolvedCorrelation,
+    outcome: resolvedOutcome,
+    mutationId: resolvedMutationId,
+  });
+
+  if (identity) {
+    const existing = eventsByIdentity.get(identity);
+    if (existing) return existing;
+  }
+
   const redactedChanges = redact(
     changes != null ? changes : (payload != null ? payload : {})
   );
@@ -136,6 +147,7 @@ function addEntry({
     actor: resolvedActor,
     correlationId: resolvedCorrelation,
     requestId: resolvedCorrelation,
+    ...(resolvedMutationId === undefined ? {} : { mutationId: resolvedMutationId }),
     outcome: resolvedOutcome,
     changes: redactedChanges,
     payload: redactedChanges,

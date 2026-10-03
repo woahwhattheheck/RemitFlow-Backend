@@ -256,6 +256,100 @@ test('duplicate-event: privileged transfer create emits one outcome under retry'
   assert.equal(replayed.id, created[0].id);
 });
 
+test('duplicate-event: repeated archive cycles retain every outcome under one correlation id', async () => {
+  const created = await fetchJson('/api/transfers', {
+    method: 'POST',
+    headers: {
+      ...auth('test-token-admin'),
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'archive-cycle-audit',
+      'X-Request-Id': 'archive-cycle-create',
+    },
+    body: JSON.stringify(TRANSFER),
+  });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  const correlationId = 'shared-archive-workflow';
+  const mutations = [];
+
+  for (const actor of ['test-token-admin', 'test-token-transfers', 'test-token-admin']) {
+    for (const action of ['archive', 'unarchive']) {
+      const path = `/api/transfers/${id}/${action}`;
+      const options = {
+        method: 'POST',
+        headers: { ...auth(actor), 'X-Request-Id': correlationId },
+      };
+      const changed = await fetchJson(path, options);
+      assert.equal(changed.status, 200);
+      mutations.push({
+        action: `transfer.${action}d`,
+        actor: auditService.actorRef(actor),
+        mutationId: changed.body.updatedAt,
+      });
+      if (action === 'archive') {
+        const noop = await fetchJson(path, options);
+        assert.equal(noop.status, 200);
+        assert.equal(noop.body.updatedAt, changed.body.updatedAt);
+      }
+    }
+  }
+
+  const query = new URLSearchParams({ resourceId: id, correlationId, order: 'asc' });
+  const listed = await fetchJson(`/api/audit?${query}`, { headers: auth('test-token-admin') });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.entries.length, 6, 'every state change needs its own outcome');
+  assert.deepEqual(listed.body.entries.map(({ action, actor, mutationId }) => ({ action, actor, mutationId })), mutations);
+  assert.equal(new Set(listed.body.entries.map((entry) => entry.mutationId)).size, 6);
+  assert.ok(listed.body.entries.every((entry) => entry.correlationId === correlationId && entry.requestId === correlationId));
+  assert.equal(JSON.stringify(listed.body).includes('test-token-'), false);
+
+  const integrity = await fetchJson('/api/audit/integrity', { headers: auth('test-token-admin') });
+  assert.equal(integrity.status, 200);
+  assert.equal(integrity.body.valid, true);
+  assert.equal(integrity.body.checked, 7, 'one creation and six state changes; archive no-ops add nothing');
+});
+
+test('mutation identity preserves first-write wins and isolates actor, scope, and state change', () => {
+  const command = {
+    action: 'transfer.archived',
+    resourceId: 'txn-mutation-identity',
+    requestId: 'shared-correlation',
+    actor: 'test-token-admin',
+    mutationId: 'version-1',
+  };
+  const first = auditService.addEntry({ ...command, changes: { archivedAt: 'first' } });
+  const replay = auditService.addEntry({
+    ...command,
+    actor: auditService.actorRef(command.actor),
+    scope: 'transfers',
+    changes: { archivedAt: 'must-not-rewrite' },
+  });
+  assert.equal(replay.id, first.id);
+  assert.equal(replay.changes.archivedAt, 'first');
+
+  const otherActor = auditService.addEntry({ ...command, actor: 'test-token-transfers' });
+  const otherScope = auditService.addEntry({ ...command, scope: 'admin' });
+  const laterMutation = auditService.addEntry({ ...command, mutationId: 'version-2' });
+  assert.equal(new Set([first.id, otherActor.id, otherScope.id, laterMutation.id]).size, 4);
+  assert.equal(auditService.countEntries(), 4);
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
+
+test('integrity-chain: mutation ID tampering is detected', () => {
+  const entry = auditService.addEntry({
+    action: 'transfer.unarchived',
+    resourceId: 'txn-mutation-tamper',
+    requestId: 'corr-mutation-tamper',
+    mutationId: 'version-1',
+  });
+  assert.equal(auditService.verifyIntegrity().valid, true);
+  entry.mutationId = 'version-2';
+  const report = auditService.verifyIntegrity();
+  assert.equal(report.valid, false);
+  assert.equal(report.brokenAt, 0);
+  assert.match(report.reason, /entryHash mismatch/);
+});
+
 // ─── Query authorization ──────────────────────────────────────────────────────
 
 test('query authorization: missing token is 401', async () => {

@@ -108,6 +108,7 @@ function computeEntryHash(entry, prevHash) {
     actor: entry.actor,
     correlationId: entry.correlationId,
     outcome: entry.outcome,
+    mutationId: entry.mutationId, // Undefined is omitted, preserving legacy hashes.
     changes: entry.changes,
     at: entry.at,
   });
