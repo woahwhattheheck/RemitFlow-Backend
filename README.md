@@ -228,7 +228,10 @@ The API implements Cache-Control response headers for security and efficiency:
 ### Health
 
 - `GET /api/health` — service health snapshot (version, uptime, env). Not a dependency gate.
-- `GET /api/health/live` — liveness probe. Process-only; stays responsive during dependency outages.
+- `GET /api/health/live` (also `HEAD`) — liveness probe. Process-only; stays responsive during dependency outages
+  and exhausted API quotas. Liveness polls do not consume the business API budget. Common security, cache,
+  parsing, timeout, request-ID and logging middleware still apply. Readiness, health snapshots and business
+  routes retain the API quota; unmatched methods or subpaths continue through the existing route stack.
 - `GET /api/health/ready` — readiness probe with bounded checks for store, payments (Stellar), and FX.
   Returns `200` when ready and `503` with redacted reason codes when a dependency is down or times out.
   Probes re-run on every request so recovery does not require a restart.

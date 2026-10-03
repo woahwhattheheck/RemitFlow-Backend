@@ -52,6 +52,101 @@ async function fetchJson(path) {
   return { status: res.status, body };
 }
 
+async function withSmallApiBudget(run) {
+  const originalMax = config.rateLimit.max;
+  const originalWindowMs = config.rateLimit.windowMs;
+  let budgetServer;
+  try {
+    config.rateLimit.max = 2;
+    config.rateLimit.windowMs = 60000;
+    budgetServer = createApp().listen(0, '127.0.0.1');
+  } finally {
+    config.rateLimit.max = originalMax;
+    config.rateLimit.windowMs = originalWindowMs;
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      budgetServer.once('listening', resolve);
+      budgetServer.once('error', reject);
+    });
+    await run(`http://127.0.0.1:${budgetServer.address().port}`);
+  } finally {
+    budgetServer.closeAllConnections();
+    await new Promise((resolve) => budgetServer.close(resolve));
+  }
+}
+
+test('liveness GET and HEAD stay available after the business API quota is exhausted', async () => {
+  await withSmallApiBudget(async (url) => {
+    for (const status of [200, 200, 429]) {
+      const response = await fetch(`${url}/api/version`);
+      assert.equal(response.status, status);
+      await response.text();
+    }
+
+    for (const [method, path] of [
+      ['GET', '/api/health/live'],
+      ['HEAD', '/api/health/live'],
+      ['GET', '/api/health/live/'],
+      ['GET', '/api/health/live?probe=quota'],
+    ]) {
+      const response = await fetch(url + path, {
+        method,
+        headers: { 'X-Request-Id': 'liveness-quota-test' },
+      });
+      assert.equal(response.status, 200, `${method} ${path}`);
+      assert.equal(response.headers.get('x-request-id'), 'liveness-quota-test');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.match(response.headers.get('cache-control'), /no-store/);
+      assert.equal(response.headers.get('x-ratelimit-limit'), null);
+      if (method === 'HEAD') {
+        assert.equal(await response.text(), '');
+      } else {
+        assert.equal((await response.json()).status, 'alive');
+      }
+    }
+
+    for (const [method, path] of [
+      ['GET', '/api/health/ready'],
+      ['GET', '/api/health'],
+      ['POST', '/api/health/live'],
+      ['GET', '/api/health/live/extra'],
+    ]) {
+      const response = await fetch(url + path, { method });
+      assert.equal(response.status, 429, `${method} ${path} remains limited`);
+      assert.equal(response.headers.get('x-ratelimit-remaining'), '0');
+      await response.text();
+    }
+  });
+});
+
+test('liveness polling during an FX outage does not consume the business API quota', async () => {
+  const originalRates = { ...RATES_TO_USD };
+  try {
+    for (const currency of Object.keys(RATES_TO_USD)) delete RATES_TO_USD[currency];
+    await withSmallApiBudget(async (url) => {
+      for (const method of ['GET', 'HEAD', 'GET']) {
+        const response = await fetch(`${url}/api/health/live`, { method });
+        assert.equal(response.status, 200);
+        await response.text();
+      }
+
+      const ready = await fetch(`${url}/api/health/ready`);
+      assert.equal(ready.status, 503);
+      assert.equal((await ready.json()).checks.fx.reason, 'FX_UNAVAILABLE');
+
+      for (const status of [200, 429]) {
+        const response = await fetch(`${url}/api/version`);
+        assert.equal(response.status, status);
+        await response.text();
+      }
+    });
+  } finally {
+    Object.assign(RATES_TO_USD, originalRates);
+  }
+});
+
 // ─── Happy path ──────────────────────────────────────────────────────────────
 
 test('readiness is ready when store, payments, and fx are healthy', async () => {
