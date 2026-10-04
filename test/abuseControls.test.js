@@ -416,6 +416,40 @@ test('a newly admitted earlier window becomes the capacity deadline after clock 
   assert.equal((await request('a')).err.statusCode, 429);
 });
 
+test('whole-table expiry clears only after the latest deadline and resets cleanly', async (t) => {
+  let now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  const limiter = rateLimit({
+    windowMs: 10_000, max: 1, maxKeys: 3, forceInTest: true,
+    keyGenerator: (req) => req.actor,
+  });
+  const request = (actor) => run(limiter, { actor }, mockRes());
+  for (const key of ['a', 'b', 'c']) assert.equal((await request(key)).err, null);
+  now = 10_999;
+  assert.equal((await request('d')).err.statusCode, 429);
+  now = 11_000;
+  assert.equal((await request('d')).err, null);
+  assert.equal(limiter.size(), 1);
+
+  // A newer insertion after a clock rollback must not erase d's live budget.
+  now = 1_000;
+  for (const key of ['e', 'f']) assert.equal((await request(key)).err, null);
+  now = 11_000;
+  assert.equal((await request('g')).err, null);
+  assert.equal(limiter.size(), 2);
+  assert.equal((await request('d')).err.statusCode, 429);
+  now = 21_000;
+  assert.equal((await request('h')).err, null);
+  assert.equal(limiter.size(), 1);
+
+  limiter.reset();
+  now = 0;
+  assert.equal((await request('i')).err, null);
+  now = 10_000;
+  assert.equal((await request('j')).err, null);
+  assert.equal(limiter.size(), 1);
+});
+
 test('correlation id is echoed on success and on 429 without leaking tokens', async () => {
   const app = express();
   app.use(requestId);

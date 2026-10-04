@@ -123,9 +123,11 @@ existing behavior when the wall clock moves backward.
 
 Admitting a new identity takes O(log n) heap work. Removing k expired identities
 takes O(k log n), without scanning the n surviving identities. The additional
-index costs O(n) memory; expiring many identities at once can do more work than
-the former linear sweep. This change addresses frequent isolated expiries while
-preserving active budgets, capacity rejection and rounded-up `Retry-After`.
+index costs O(n) memory. A maximum deadline also tracks when the entire table
+has expired; that case clears both collections without popping individual heap
+nodes. If any budget remains live, the existing heap pruning still applies and
+expiring many older identities can do more work than a linear sweep. Both paths
+preserve active budgets, capacity rejection and rounded-up `Retry-After`.
 
 ### Measured component result, October 4, 2026
 
@@ -185,3 +187,51 @@ Dependencies came from the matching-lock artifact of the already-completed
 That job's 46 archive passes concern PR #144; the 17/273 results above are separate
 local executions of this PR #138 composition. Sharing dependencies adds no claim
 that the hosted archive job executed the limiter patch.
+
+### Whole-table expiry continuation, October 4, 2026
+
+The maximum deadline is independent of insertion order. It changes only when
+an identity is admitted, and resets when the limiter or whole table is cleared.
+A clock rollback can create an earlier new deadline without causing a later
+live budget to be removed. Clearing waits until the latest deadline, inclusive.
+JavaScript collection clearing and later garbage collection remain runtime
+costs; this is not a constant-time or process-throughput guarantee.
+
+The following Node 24.19.0 measurements compare the exact preceding middleware
+at `ebda2cb811d1c3ad35c1fec8af46cf83d45df8b3` with this continuation. Each
+workload fills 10,000 identities, then measures the first admission once every
+budget has expired. Five alternating before/after pairs contain 20 rounds each.
+
+| First-admission latency | Previous median | Updated median |
+|---|---:|---:|
+| All identities share one deadline | 0.6200 ms | 0.01655 ms |
+| Staggered deadlines, all expired | 1.8185 ms | 0.01114 ms |
+
+Both versions return identical headers, errors and retained sizes, including
+the next request's 429. Instrumented runs remove 200,000 expired-entry `Map`
+deletions over 20 rounds; the new identity's normal insertion remains. These
+are actual production middleware modules with a controlled clock and request
+objects, not an HTTP or external-provider benchmark.
+
+Admission-fill timings are also retained, not folded into the first-admission
+claim. Across these pairs their medians changed from 174.5 to 227.1 ms for the
+same-deadline workload and 164.3 to 181.8 ms for staggered deadlines. Allocation,
+garbage collection and host load affect those measurements; the result
+establishes less work on the expiry-triggering request, not higher total
+throughput. Raw samples and source hashes are in
+[the batch-expiry result](validation/rate-limit-batch-expiry-20261004.json).
+
+Four maintained expiry/renewal regressions pass, including one new boundary,
+clock-rollback and reset case. The exact command is:
+
+```sh
+node --test --test-name-pattern='expiry|renewal|clock rollback' test/abuseControls.test.js
+```
+
+The focused run uses the existing matching-lock dependency artifact referenced
+above, without dependency changes. It does not rerun the full application suite.
+Reproduce the component comparison with two checkouts and a new output filename:
+
+```sh
+node scripts/benchmark-rate-limit-batch-expiry.cjs BEFORE_CHECKOUT AFTER_CHECKOUT NEW_RESULT.json
+```

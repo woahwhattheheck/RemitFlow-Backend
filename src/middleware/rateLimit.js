@@ -42,8 +42,11 @@ function rateLimit(options = {}) {
   // One heap node per tracked identity. A rolled-back clock can give a newly
   // admitted key an earlier deadline, so insertion order is not expiry order.
   const expiries = [];
+  // Maximum deadline, independent of admission order after clock rollback.
+  let latestResetAt = -Infinity;
 
   function scheduleExpiry(key, entry) {
+    latestResetAt = Math.max(latestResetAt, entry.resetAt);
     const node = { key, entry };
     let index = expiries.length;
     expiries.push(node);
@@ -57,6 +60,14 @@ function rateLimit(options = {}) {
   }
 
   function pruneExpired(now) {
+    // A burst can expire the whole table together. No budget survives this
+    // deadline, even after clock rollback, so avoid removing each heap node.
+    if (expiries.length && now >= latestResetAt) {
+      hits.clear();
+      expiries.length = 0;
+      latestResetAt = -Infinity;
+      return;
+    }
     // Remove expired entries without scanning the surviving budgets. Repeated
     // hits never enqueue again; pruning before renewal keeps both tables bounded.
     while (expiries.length && now >= expiries[0].entry.resetAt) {
@@ -155,6 +166,7 @@ function rateLimit(options = {}) {
   rateLimitMiddleware.reset = function reset() {
     hits.clear();
     expiries.length = 0;
+    latestResetAt = -Infinity;
   };
 
   rateLimitMiddleware.size = function size() {
