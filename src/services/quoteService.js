@@ -147,7 +147,9 @@ function getQuote(amount, from, to, opts = {}) {
   const fee = calculateFee(numericAmount);
   const amountAfterFee = money.round(numericAmount - fee);
 
-  const snapshot = rateService.getSnapshot({ now, policy });
+  // Leave normal requests on the cache's live clock through provider work.
+  // Only an explicitly supplied snapshot time should freeze admission time.
+  const snapshot = rateService.getSnapshot({ now: opts.now, policy });
   if (!Object.prototype.hasOwnProperty.call(snapshot.ratesToUsd, fromCode)) {
     throw ApiError.badRequest(`Unsupported source currency: ${from}`);
   }
@@ -320,8 +322,8 @@ function resolveForTransfer(data, opts = {}) {
   }
 
   const quote = getQuote(data.amount, data.from, data.to, {
-    now,
-    policy: 'reject_stale',
+    now: opts.now,
+    policy: config.fx.allowStaleForTransfers ? 'allow_stale' : 'reject_stale',
   });
   // A synchronous provider may consume the remaining FX or quote TTL.
   // Check at completion before settlement, retaining an explicit test clock.
