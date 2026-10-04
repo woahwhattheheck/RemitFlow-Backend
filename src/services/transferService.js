@@ -1,5 +1,7 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
+
 const { store } = require('../store');
 const { prefixedId } = require('../utils/ids');
 const ApiError = require('../utils/ApiError');
@@ -17,6 +19,16 @@ function nextTimestamp(previous) {
   const now = Date.now();
   const previousMs = previous ? Date.parse(previous) : NaN;
   return new Date(Math.max(now, Number.isFinite(previousMs) ? previousMs + 1 : now)).toISOString();
+}
+
+/**
+ * Build a stable provider idempotency identifier without copying bearer tokens
+ * or caller keys into provider receipts or client-visible transfer state.
+ * JSON tuple framing removes delimiter ambiguity before hashing.
+ */
+function createSettlementOperationId(transferId, action, actor, key) {
+  const canonical = JSON.stringify([transferId, action, actor, key]);
+  return `settlement_${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
 /**
@@ -505,7 +517,7 @@ function executeLifecycleMutation(id, spec, requestId, lifecycle) {
 
     const beforeStatus = transfer.status;
     const beforeVersion = currentVersion(transfer);
-    const operationId = `${id}:${spec.action}:${context.actor}:${context.key}`;
+    const operationId = createSettlementOperationId(id, spec.action, context.actor, context.key);
     const prepared = spec.prepare ? spec.prepare(operationId) : undefined;
 
     // Re-check immediately before CAS so a re-entrant adapter that somehow
