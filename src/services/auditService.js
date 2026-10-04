@@ -211,29 +211,41 @@ function verifyIntegrity() {
       };
     }
 
-    const recomputed = computeEntryHash(entry, expectedPrev);
-    if (recomputed !== entry.entryHash) {
-      return {
-        valid: false,
-        checked: i,
-        tipHash,
-        brokenAt: i,
-        reason: `entryHash mismatch at chainSeq ${entry.chainSeq}`,
-      };
-    }
+    try {
+      const recomputed = computeEntryHash(entry, expectedPrev);
+      if (recomputed !== entry.entryHash) {
+        return {
+          valid: false,
+          checked: i,
+          tipHash,
+          brokenAt: i,
+          reason: `entryHash mismatch at chainSeq ${entry.chainSeq}`,
+        };
+      }
 
-    // Legacy consumers read these aliases, while the hash binds the canonical
-    // fields. Verify their values without changing the stored hash format.
-    if (entry.resourceId !== entry.target
-      || entry.requestId !== entry.correlationId
-      || (entry.payload !== entry.changes
-        && canonicalize(entry.payload) !== canonicalize(entry.changes))) {
+      // Legacy consumers read these aliases, while the hash binds the canonical
+      // fields. Verify their values without changing the stored hash format.
+      if (entry.resourceId !== entry.target
+        || entry.requestId !== entry.correlationId
+        || (entry.payload !== entry.changes
+          && canonicalize(entry.payload) !== canonicalize(entry.changes))) {
+        return {
+          valid: false,
+          checked: i,
+          tipHash,
+          brokenAt: i,
+          reason: `compatibility alias mismatch at chainSeq ${entry.chainSeq}`,
+        };
+      }
+    } catch {
+      // Tampered payloads may be cyclic or contain throwing accessors. Do not
+      // return their contents or exception messages to the integrity caller.
       return {
         valid: false,
         checked: i,
         tipHash,
         brokenAt: i,
-        reason: `compatibility alias mismatch at chainSeq ${entry.chainSeq}`,
+        reason: 'entry contents cannot be verified',
       };
     }
 
