@@ -77,17 +77,13 @@ function redact(value) {
   if (value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(redact);
 
-  const out = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (SENSITIVE_KEY_PATTERN.test(key.replace(/-/g, '_'))) {
-      out[key] = REDACTED;
-    } else if (child != null && typeof child === 'object') {
-      out[key] = redact(child);
-    } else {
-      out[key] = child;
-    }
-  }
-  return out;
+  // Create own data properties even for JSON keys such as "__proto__".
+  // Assignment to {} would invoke the inherited setter, dropping evidence
+  // from both JSON responses and the canonical hash's own-key traversal.
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    SENSITIVE_KEY_PATTERN.test(key.replace(/-/g, '_')) ? REDACTED : redact(child),
+  ]));
 }
 
 /**
