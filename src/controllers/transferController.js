@@ -109,7 +109,7 @@ function listTransfers(req, res) {
     defaultOrder: 'asc',
     query: (args) => transferService.queryTransfers({ ...filters, ...args, auth }),
     countTotal: () => transferService.listTransfers(filters, auth).length,
-    resolvePosition: (seq) => transferService.positionKeyAt(seq),
+    resolvePosition: (seq) => transferService.positionKeyAt(seq, auth),
   });
 
   res.json({ ...envelope, transfers: items });
