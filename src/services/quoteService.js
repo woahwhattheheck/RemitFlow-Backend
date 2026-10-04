@@ -2,7 +2,6 @@
 
 const config = require('../config');
 const rateService = require('./rateService');
-const money = require('../utils/money');
 const currencyPolicy = require('../utils/currencyPolicy');
 const ApiError = require('../utils/ApiError');
 
@@ -85,7 +84,8 @@ function getQuote(amount, from, to) {
     sendAmount: numericAmount,
     fee,
     amountAfterFee,
-    rate: money.round(rate),
+    // FX ratios are not currency amounts; retain the conversion precision.
+    rate,
     receiveAmount,
   };
 }

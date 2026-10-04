@@ -1,7 +1,6 @@
 'use strict';
 
 const { RATES_TO_USD, SUPPORTED_CURRENCIES } = require('../config/rates');
-const money = require('../utils/money');
 const currency = require('../utils/currency');
 const currencyPolicy = require('../utils/currencyPolicy');
 const ApiError = require('../utils/ApiError');
@@ -78,7 +77,8 @@ function getPair(from, to) {
   return {
     from: fromCode,
     to: toCode,
-    rate: money.round(getRate(fromCode, toCode)),
+    // Applying minor-unit rounding here can turn a valid FX rate into zero.
+    rate: getRate(fromCode, toCode),
   };
 }
 
