@@ -472,6 +472,18 @@ function archiveTransfer(id, optionsOrRequestId) {
     transfer.updatedAt,
     lastArchiveHistoryAt(transfer)
   );
+  // Keep the current state and concurrency token intact if audit append fails.
+  auditService.addEntry({
+    action: 'transfer.archived',
+    resourceId: transfer.id,
+    payload: {
+      archivedAt: timestamp,
+      actor: options.actor,
+      reason: options.reason,
+    },
+    requestId: options.requestId,
+  });
+
   transfer.archivedAt = timestamp;
   transfer.lastArchivedAt = timestamp;
   transfer.updatedAt = timestamp;
@@ -482,17 +494,6 @@ function archiveTransfer(id, optionsOrRequestId) {
     actor: options.actor,
     reason: options.reason,
     requestId: options.requestId || null,
-  });
-
-  auditService.addEntry({
-    action: 'transfer.archived',
-    resourceId: transfer.id,
-    payload: {
-      archivedAt: timestamp,
-      actor: options.actor,
-      reason: options.reason,
-    },
-    requestId: options.requestId,
   });
 
   return transfer;
@@ -525,18 +526,7 @@ function unarchiveTransfer(id, optionsOrRequestId) {
     previousArchivedAt
   );
 
-  transfer.archivedAt = null;
-  transfer.lastArchivedAt = previousArchivedAt;
-  transfer.updatedAt = timestamp;
-
-  appendArchiveHistory(transfer, {
-    action: 'unarchive',
-    at: timestamp,
-    actor: options.actor,
-    reason: options.reason,
-    requestId: options.requestId || null,
-  });
-
+  // Keep the current state and concurrency token intact if audit append fails.
   auditService.addEntry({
     action: 'transfer.unarchived',
     resourceId: transfer.id,
@@ -547,6 +537,18 @@ function unarchiveTransfer(id, optionsOrRequestId) {
       reason: options.reason,
     },
     requestId: options.requestId,
+  });
+
+  transfer.archivedAt = null;
+  transfer.lastArchivedAt = previousArchivedAt;
+  transfer.updatedAt = timestamp;
+
+  appendArchiveHistory(transfer, {
+    action: 'unarchive',
+    at: timestamp,
+    actor: options.actor,
+    reason: options.reason,
+    requestId: options.requestId || null,
   });
 
   return transfer;
