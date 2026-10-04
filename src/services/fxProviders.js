@@ -114,6 +114,18 @@ function fetchWithFallback(opts = {}) {
       if (missingCurrency) {
         throw new Error(`Provider ${provider.id} omitted supported currency ${missingCurrency}`);
       }
+      // Finite positive entries can still yield Infinity (or zero in the
+      // reverse direction) when divided. Every configured pair uses this
+      // snapshot, so reject it before it can suppress a usable fallback.
+      let minRate = Infinity;
+      let maxRate = 0;
+      for (const code of SUPPORTED_CURRENCIES) {
+        minRate = Math.min(minRate, ratesToUsd[code]);
+        maxRate = Math.max(maxRate, ratesToUsd[code]);
+      }
+      if (!Number.isFinite(maxRate / minRate)) {
+        throw new Error(`Provider ${provider.id} returned unrepresentable cross-rates`);
+      }
       const normalized = {
         providerId: snapshot.providerId || provider.id,
         ratesToUsd,
