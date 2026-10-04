@@ -1,0 +1,76 @@
+name: RFB144 body-precondition acceptance
+
+on:
+  push:
+    branches: [validation/rfb144-body-precondition-a993]
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 45d0bd4e8f1ad71a22ee3d759a84388ae2a9f968
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify immutable source and lock
+        run: |
+          test "$(git rev-parse HEAD)" = "45d0bd4e8f1ad71a22ee3d759a84388ae2a9f968"
+          test "$(git hash-object package-lock.json)" = "be3ad84b812121d2ec4f47541df3a55816bb210c"
+      - name: Install the unchanged lockfile
+        run: npm ci
+      - name: Retain reusable dependencies and runtime identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/rfb144-acceptance"
+          tar -czf "$RUNNER_TEMP/rfb144-acceptance/node_modules.tar.gz" node_modules
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const destination = path.join(process.env.RUNNER_TEMP, 'rfb144-acceptance');
+          const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+          const git = (...args) => cp.execFileSync('git', args, {encoding: 'utf8'}).trim();
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const metadata = {
+            source_repository: 'woahwhattheheck/RemitFlow-Backend',
+            source_sha: git('rev-parse', 'HEAD'),
+            workflow_sha: process.env.GITHUB_SHA,
+            workflow_run_id: process.env.GITHUB_RUN_ID,
+            node_version: process.version,
+            npm_version: cp.execFileSync('npm', ['--version'], {encoding: 'utf8'}).trim(),
+            platform: process.platform,
+            architecture: process.arch,
+            package_lock_blob: git('hash-object', 'package-lock.json'),
+            package_lock_sha256: digest('package-lock.json'),
+            package_manifest_blob: git('hash-object', 'package.json'),
+            locked_dependency_count: Object.keys(lock.packages).filter(key => key !== '').length,
+            node_modules_archive_sha256: digest(path.join(destination, 'node_modules.tar.gz')),
+            suites: ['test/transferArchive.test.js', 'test/transferArchiveLifecycle.test.js']
+          };
+          fs.writeFileSync(path.join(destination, 'runtime-metadata.json'), JSON.stringify(metadata, null, 2) + '\n');
+          console.log(JSON.stringify(metadata, null, 2));
+          NODE
+      - name: Run the maintained archive acceptance suites
+        run: |
+          set -o pipefail
+          node --test --test-concurrency=1 test/transferArchive.test.js test/transferArchiveLifecycle.test.js 2>&1 | tee "$RUNNER_TEMP/rfb144-acceptance/acceptance.tap"
+      - name: Retain native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rfb144-body-precondition-a993
+          path: |
+            ${{ runner.temp }}/rfb144-acceptance/runtime-metadata.json
+            ${{ runner.temp }}/rfb144-acceptance/acceptance.tap
+            ${{ runner.temp }}/rfb144-acceptance/node_modules.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
