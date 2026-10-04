@@ -1,0 +1,52 @@
+name: FX provider error response validation
+
+on:
+  push:
+    branches: [validation/rfb141-provider-errors-20261004]
+
+permissions:
+  contents: read
+
+jobs:
+  provider-errors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Exercise original and repaired public error responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version | tee /tmp/rfb141-runtime.txt
+          npm --version | tee -a /tmp/rfb141-runtime.txt
+          git hash-object src/services/fxProviders.js test/fxProviderErrors.test.js | tee /tmp/rfb141-source-blobs.txt
+          cp src/services/fxProviders.js /tmp/rfb141-provider-candidate.js
+          git show be2152a0deabe52b21a5f3cc89678c7d8ca2ff3b:src/services/fxProviders.js > src/services/fxProviders.js
+          set +e
+          node --test test/fxProviderErrors.test.js > /tmp/rfb141-before.tap 2>&1
+          before_status=$?
+          set -e
+          cat /tmp/rfb141-before.tap
+          test "$before_status" -eq 1
+          node -e "const s=require('node:fs').readFileSync('/tmp/rfb141-before.tap','utf8');if(!s.includes('synthetic-secret-primary')||!s.includes('ERR_ASSERTION'))process.exit(1)"
+          cp /tmp/rfb141-provider-candidate.js src/services/fxProviders.js
+          node --test test/fxProviderErrors.test.js > /tmp/rfb141-after.tap 2>&1
+          cat /tmp/rfb141-after.tap
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fx-provider-error-before-after
+          path: |
+            /tmp/rfb141-before.tap
+            /tmp/rfb141-after.tap
+            /tmp/rfb141-runtime.txt
+            /tmp/rfb141-source-blobs.txt

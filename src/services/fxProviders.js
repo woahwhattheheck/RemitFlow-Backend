@@ -123,10 +123,12 @@ function fetchWithFallback(opts = {}) {
         throw new Error(`Provider ${provider.id} returned a snapshot outside the requested freshness policy`);
       }
       return normalized;
-    } catch (err) {
+    } catch {
+      // Attempts are serialized in public HTTP errors. Adapter exceptions can
+      // contain credentials or upstream response bodies, so never expose them.
       errors.push({
         providerId: provider.id,
-        message: err && err.message ? err.message : String(err),
+        message: 'FX provider failed',
       });
     }
   }
