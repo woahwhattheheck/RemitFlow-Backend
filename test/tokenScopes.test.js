@@ -406,6 +406,39 @@ test('transfer service boundary rejects under-scoped auth on write and read', ()
   );
 });
 
+test('cursor position helpers reject explicitly under-scoped service callers', () => {
+  assert.throws(
+    () => transferService.positionKeyAt(0, {
+      actor: 'w',
+      scopes: [SCOPES.TRANSFERS_WRITE],
+    }),
+    (err) => err.statusCode === 403
+  );
+  assert.throws(
+    () => auditService.positionKeyAt(0, null, {
+      actor: 't',
+      scopes: [SCOPES.TRANSFERS_READ],
+    }),
+    (err) => err.statusCode === 403
+  );
+
+  assert.doesNotThrow(() =>
+    transferService.positionKeyAt(0, {
+      actor: 'r',
+      scopes: [SCOPES.TRANSFERS_READ],
+    })
+  );
+  assert.doesNotThrow(() =>
+    auditService.positionKeyAt(0, null, {
+      actor: 'a',
+      scopes: [SCOPES.AUDIT_READ],
+    })
+  );
+  // Trusted internal callers without auth remain compatible.
+  assert.doesNotThrow(() => transferService.positionKeyAt(0));
+  assert.doesNotThrow(() => auditService.positionKeyAt(0));
+});
+
 test('service boundary: malformed id throws the same not-found error as a miss', () => {
   const malformed = () => transferService.getTransferOrThrow('txn_bad', {
     actor: 'r',
