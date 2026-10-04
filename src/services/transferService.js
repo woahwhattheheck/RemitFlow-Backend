@@ -303,13 +303,18 @@ function createTransferUnchecked(data, requestId, idempotency) {
  * @param {string} nextStatus
  * @returns {object}
  */
-function transition(transfer, nextStatus) {
+function assertTransition(transfer, nextStatus) {
   const allowed = TRANSFER_TRANSITIONS[transfer.status] || [];
   if (!allowed.includes(nextStatus)) {
     throw ApiError.conflict(
       `Cannot change transfer from ${transfer.status} to ${nextStatus}`
     );
   }
+  return transfer;
+}
+
+function transition(transfer, nextStatus) {
+  assertTransition(transfer, nextStatus);
   transfer.status = nextStatus;
   transfer.updatedAt = nextTimestamp(transfer.updatedAt);
   return transfer;
@@ -323,8 +328,25 @@ function transition(transfer, nextStatus) {
  */
 function claimTransfer(id, requestId, actor) {
   const transfer = getTransferOrThrow(id);
+  assertTransition(transfer, TRANSFER_STATUS.CLAIMED);
+  let claimableBalanceId;
+  try {
+    claimableBalanceId = stellarService.createClaimableBalanceId();
+  } catch (err) {
+    // Leave the pending transfer unchanged when the adapter fails. Retain an
+    // attributable outcome without copying exception text or credentials.
+    auditService.addEntry({
+      action: 'transfer.claimed',
+      resourceId: transfer.id,
+      payload: { stage: 'claim', code: 'CLAIM_ADAPTER_FAILED' },
+      requestId,
+      actorToken: actor,
+      outcome: 'failure',
+    });
+    throw err;
+  }
   transition(transfer, TRANSFER_STATUS.CLAIMED);
-  transfer.claimableBalanceId = stellarService.createClaimableBalanceId();
+  transfer.claimableBalanceId = claimableBalanceId;
 
   auditService.addEntry({
     action: 'transfer.claimed',

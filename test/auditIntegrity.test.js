@@ -568,3 +568,67 @@ test('privileged archive/unarchive mutations each emit one outcome event', () =>
   assert.equal(unarchived.length, 1);
   assert.equal(auditService.verifyIntegrity().valid, true);
 });
+
+// A failed adapter call must not strand a pending transfer as already claimed.
+test('claim failure: preserves state and records a redacted attributable outcome', (t) => {
+  const stellar = require('../src/services/stellarService');
+  const row = transferService.createTransfer(TRANSFER, 'failure-create');
+  const snapshot = JSON.parse(JSON.stringify(row));
+  const failure = new Error('private provider token=do-not-retain');
+  t.mock.method(stellar, 'createClaimableBalanceId', () => { throw failure; });
+
+  assert.throws(() => transferService.claimTransfer(row.id, 'failed-claim', 'test-token-admin'),
+    (err) => err === failure);
+  assert.deepEqual(row, snapshot);
+  const entries = auditService.getEntries().filter((e) => e.action === 'transfer.claimed');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].outcome, 'failure');
+  assert.equal(entries[0].correlationId, 'failed-claim');
+  assert.equal(entries[0].target, row.id);
+  assert.equal(entries[0].scope, 'transfers');
+  assert.equal(entries[0].actor, auditService.actorRef('test-token-admin'));
+  assert.deepEqual(entries[0].changes, { stage: 'claim', code: 'CLAIM_ADAPTER_FAILED' });
+  const encoded = JSON.stringify(entries);
+  assert.equal(encoded.includes('test-token-admin'), false);
+  assert.equal(encoded.includes('do-not-retain'), false);
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
+
+test('claim failure: same-correlation recovery has one failure and one success', (t) => {
+  const stellar = require('../src/services/stellarService');
+  const row = transferService.createTransfer(TRANSFER, 'retry-create');
+  const failure = new Error('temporary adapter failure');
+  let fail = true;
+  let calls = 0;
+  t.mock.method(stellar, 'createClaimableBalanceId', () => {
+    calls += 1;
+    if (fail) throw failure;
+    return 'cb-recovered';
+  });
+  for (let i = 0; i < 2; i += 1) {
+    assert.throws(() => transferService.claimTransfer(row.id, 'retry-claim', 'test-token-admin'),
+      (err) => err === failure);
+  }
+  fail = false;
+  const recovered = transferService.claimTransfer(row.id, 'retry-claim', 'test-token-admin');
+  assert.equal(recovered.status, 'claimed');
+  assert.equal(recovered.claimableBalanceId, 'cb-recovered');
+  assert.equal(calls, 3);
+  const entries = auditService.getEntries().filter((e) => e.action === 'transfer.claimed');
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map((e) => e.outcome), ['success', 'failure']);
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
+
+test('claim failure: terminal and missing targets never call the adapter', (t) => {
+  const stellar = require('../src/services/stellarService');
+  const row = transferService.createTransfer(TRANSFER, 'terminal-create');
+  transferService.cancelTransfer(row.id, 'cancel-before-claim', 'test-token-admin');
+  const adapter = t.mock.method(stellar, 'createClaimableBalanceId', () => 'unexpected');
+  assert.throws(() => transferService.claimTransfer(row.id, 'terminal-claim', 'test-token-admin'));
+  assert.throws(() => transferService.claimTransfer('missing', 'missing-claim', 'test-token-admin'));
+  assert.equal(adapter.mock.callCount(), 0);
+  assert.equal(row.status, 'cancelled');
+  assert.equal(auditService.getEntries().filter((e) => e.action === 'transfer.claimed').length, 0);
+  assert.equal(auditService.verifyIntegrity().valid, true);
+});
