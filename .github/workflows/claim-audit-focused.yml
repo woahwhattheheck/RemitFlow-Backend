@@ -1,0 +1,69 @@
+name: Claim audit failure regression
+on:
+  push:
+    branches: [validation/claim-audit-20261004-4bac]
+permissions:
+  contents: write
+jobs:
+  claim-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 2bee10a64b326b6fffa0d4f51cbde8151affdc7d
+          path: subject
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Install unchanged locked runtime
+        working-directory: subject
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: One focused before and after audit-file execution
+        working-directory: subject
+        run: |
+          mkdir -p ../evidence
+          git apply ../controller/claim.patch
+          git checkout HEAD -- src/services/transferService.js
+          set +e
+          node --test --test-name-pattern='claim failure:' test/auditIntegrity.test.js > ../evidence/before.tap 2>&1
+          before=$?
+          set -e
+          test "$before" = 1
+          grep -q '^# fail 2$' ../evidence/before.tap
+          git apply --include=src/services/transferService.js ../controller/claim.patch
+          node --test test/auditIntegrity.test.js > ../evidence/after.tap 2>&1
+          python - <<'PY'
+          from pathlib import Path
+          import os, subprocess
+          expected = {'src/services/transferService.js':'a080e89302a8b04eb6a759fddaf5a742895fc7cf','test/auditIntegrity.test.js':'a9a8c7adb7ddea9ec90ca3ee5eeb66a2fbc8b276'}
+          assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip()=='2bee10a64b326b6fffa0d4f51cbde8151affdc7d'
+          for path, sha in expected.items():
+            assert subprocess.check_output(['git','hash-object',path]).decode().strip()==sha
+          assert set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines())==set(expected)
+          before=Path('../evidence/before.tap').read_text()
+          after=Path('../evidence/after.tap').read_text()
+          totals=lambda text:'\n'.join(line for line in text.splitlines() if line.startswith(('# tests ', '# pass ', '# fail ', '# skipped ')))
+          Path('docs').mkdir(exist_ok=True)
+          Path('docs/CLAIM_FAILURE_AUDIT.md').write_text('# Claim failure state and audit outcome\n\nAn adapter failure now leaves the pending transfer, timestamp and claimable-balance fields unchanged. It records a hash-chained failure outcome with actor fingerprint, target, scope and request correlation, then propagates the original exception. Raw error messages, stacks and credentials are not copied into audit storage. A successful retry records its separate success outcome; repeated failure with the same event identity retains the existing deduplication behavior. Missing or terminal targets never call the adapter.\n\nThe Stellar adapter in this repository is an explicit in-memory simulation. The regression injects a thrown error at that adapter boundary; it is not a live Stellar outage, blockchain transaction or durable settlement test. Other source changes, including JSON-key and sparse-array integrity repairs, are preserved.\n\n## Focused execution\n\nNode22.16.0, unchanged npm-ci lock, run '+os.environ['GITHUB_RUN_ID']+'.\n\nBefore, only new failure cases:\n```\nnode --test --test-name-pattern="claim failure:" test/auditIntegrity.test.js\n'+totals(before)+'\n```\n\nAfter, the maintained audit-integrity file:\n```\nnode --test test/auditIntegrity.test.js\n'+totals(after)+'\n```\n\nSource blobs: '+str(expected)+'\n\nNo broad suite, deployment, live provider call or dependency change. A failed local dependency installation could not reach the registry; the recorded execution above used the cloud runner and original locked dependencies.\n')
+          PY
+          git config user.name woahwhattheheck
+          git config user.email brycembusiness2@gmail.com
+          git add src/services/transferService.js test/auditIntegrity.test.js docs/CLAIM_FAILURE_AUDIT.md
+          git commit -m 'fix(audit): preserve pending claims on adapter failure [skip ci]'
+          git rev-parse HEAD > ../evidence/candidate.sha
+          git rev-parse HEAD^{tree} > ../evidence/candidate.tree
+          git diff HEAD^ HEAD -- > ../evidence/candidate.patch
+          git push origin HEAD:refs/heads/validation/claim-audit-candidate-20261004-4bac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: claim-audit-failure-20261004-4bac
+          path: |
+            evidence/
+            subject/docs/CLAIM_FAILURE_AUDIT.md
+          retention-days: 7
