@@ -67,11 +67,14 @@ function getQuote(amount, from, to) {
   const rate = rateService.getRate(fromCode, toCode);
   // Receive side rounds to the *destination* currency's minor units so a
   // JPY payout never carries fractional yen that settlement cannot pay.
-  const receiveAmount = rateService.convert(
-    amountAfterFee,
-    fromCode,
-    toCode
-  );
+  let receiveAmount;
+  try {
+    receiveAmount = rateService.convert(amountAfterFee, fromCode, toCode);
+  } catch (err) {
+    // Valid source units can still overflow the destination's minor units.
+    if (!(err instanceof RangeError)) throw err;
+    throw ApiError.badRequest('receive amount is outside the supported numeric range');
+  }
   if (receiveAmount <= 0) {
     throw ApiError.badRequest(
       'Amount must produce a positive receive amount after fees and currency rounding'
