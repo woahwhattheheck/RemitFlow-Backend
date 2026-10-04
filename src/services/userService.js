@@ -22,9 +22,11 @@ function listUsers(auth) {
 /**
  * Find a user by id.
  * @param {string} id
+ * @param {{ scopes?: string[] }|null} [auth] - optional service authorization context
  * @returns {object|undefined}
  */
-function findUser(id) {
+function findUser(id, auth) {
+  assertScopes(auth, SCOPES.USERS_READ);
   return store.users.get(id);
 }
 
