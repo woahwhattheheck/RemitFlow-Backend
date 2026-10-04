@@ -41,14 +41,23 @@ function canonicalize(value) {
     return JSON.stringify(value) ?? 'null';
   }
   if (Array.isArray(value)) {
-    // Visit every numeric slot: map() skips holes and can hash [empty] as [].
-    const items = Array.from(
-      { length: value.length }, (_, index) => canonicalize(value[index])
-    );
-    return `[${items.join(',')}]`;
+    // Capture the length and visit every slot, including holes as null.
+    const length = value.length;
+    let encoded = '[';
+    for (let index = 0; index < length; index += 1) {
+      if (index > 0) encoded += ',';
+      encoded += canonicalize(value[index]);
+    }
+    return `${encoded}]`;
   }
   const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`;
+  let encoded = '{';
+  for (let index = 0; index < keys.length; index += 1) {
+    if (index > 0) encoded += ',';
+    const key = keys[index];
+    encoded += `${JSON.stringify(key)}:${canonicalize(value[key])}`;
+  }
+  return `${encoded}}`;
 }
 
 /**
