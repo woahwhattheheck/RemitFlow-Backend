@@ -30,7 +30,7 @@ function listAuditEntries(req, res) {
     defaultOrder: 'desc',
     query: (args) => auditService.queryEntries({ resourceId, ...args, auth }),
     countTotal: () => auditService.countEntries(resourceId, auth),
-    resolvePosition: (seq) => auditService.positionKeyAt(seq, resourceId),
+    resolvePosition: (seq) => auditService.positionKeyAt(seq, resourceId, auth),
   });
 
   res.json({ ...envelope, entries: items });
