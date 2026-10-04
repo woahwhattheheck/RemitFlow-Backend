@@ -75,10 +75,24 @@ function remember(quote) {
  */
 const QUOTE_GC_THRESHOLD = 256;
 
+// Quotes are scanned repeatedly while still live. Cache only their parsed
+// string timestamp, not the grace-adjusted deadline. Weak keys do not keep
+// evicted quotes alive, and a changed expiry string is parsed again.
+const quoteExpiryCache = new WeakMap();
+
+function quoteExpiryMs(quote) {
+  const value = quote.quoteExpiresAt;
+  const cached = quoteExpiryCache.get(quote);
+  if (cached && cached.value === value) return cached.ms;
+  const ms = Date.parse(value);
+  if (typeof value === 'string') quoteExpiryCache.set(quote, { value, ms });
+  return ms;
+}
+
 function gcQuotes(now) {
   if (store.quotes.size < QUOTE_GC_THRESHOLD) return;
   for (const [id, quote] of store.quotes.entries()) {
-    const expiresAtMs = Date.parse(quote.quoteExpiresAt);
+    const expiresAtMs = quoteExpiryMs(quote);
     if (Number.isFinite(expiresAtMs) && expiresAtMs + config.fx.staleGraceMs < now) {
       store.quotes.delete(id);
     }
