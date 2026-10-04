@@ -273,8 +273,10 @@ quote. A zero or negative payout after fees and destination rounding is
 rejected with `400` by preview and transfer creation, before settlement or
 transfer insertion.
 
-Fee calculation and FX conversion retain their decimal inputs until one
-rounding step to the destination minor units. Nonnegative funds round half up;
+Fee calculation retains the original decimal factors until the combined fee
+is rounded once to source-currency minor units. FX conversion then retains its
+decimal factors until the payout is rounded once to destination-currency minor
+units. Nonnegative funds round half up;
 negative intermediate values keep the existing ties-toward-positive-infinity
 behavior. For example, a `16.04 GBP` send has a `0.54 GBP` fee and a
 `19.69 USD` payout at the mock `1.27` rate (`15.50 × 1.27 = 19.685`).
