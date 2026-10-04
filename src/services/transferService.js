@@ -397,7 +397,7 @@ function compareAndSetTransition(transfer, { expectedVersion, nextStatus, mutate
  * @param {string} transferId
  * @param {{ action: string, actor: string, key: string, token: string }} lease
  */
-function acquireLifecycleLease(transferId, lease) {
+function assertLifecycleLeaseAvailable(transferId, requestedAction) {
   const existing = store.lifecycleLeases.get(transferId);
   if (existing) {
     throw ApiError.conflict(
@@ -405,10 +405,14 @@ function acquireLifecycleLease(transferId, lease) {
       {
         transferId,
         heldAction: existing.action,
-        requestedAction: lease.action,
+        requestedAction,
       }
     );
   }
+}
+
+function acquireLifecycleLease(transferId, lease) {
+  assertLifecycleLeaseAvailable(transferId, lease.action);
   store.lifecycleLeases.set(transferId, lease);
 }
 
@@ -621,6 +625,7 @@ function cancelTransfer(id, requestId, lifecycle) {
 function archiveTransfer(id) {
   const transfer = getTransferOrThrow(id);
   if (!transfer.archivedAt) {
+    assertLifecycleLeaseAvailable(id, 'archive');
     const timestamp = nextTimestamp(transfer.updatedAt);
     transfer.archivedAt = timestamp;
     transfer.updatedAt = timestamp;
@@ -639,6 +644,7 @@ function unarchiveTransfer(id) {
   if (!transfer.archivedAt) {
     throw ApiError.conflict(`Transfer is not archived: ${id}`);
   }
+  assertLifecycleLeaseAvailable(id, 'unarchive');
   transfer.archivedAt = null;
   transfer.updatedAt = nextTimestamp(transfer.updatedAt);
   transfer.version = currentVersion(transfer) + 1;
