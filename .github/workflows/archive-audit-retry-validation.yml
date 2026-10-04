@@ -1,0 +1,52 @@
+name: Archive audit failure retry validation
+
+on:
+  push:
+    branches: [validation/rfb144-audit-retry-20261004]
+
+permissions:
+  contents: read
+
+jobs:
+  archive-audit-retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Exercise original and repaired archive retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version | tee /tmp/rfb144-runtime.txt
+          npm --version | tee -a /tmp/rfb144-runtime.txt
+          git hash-object src/services/transferService.js test/archiveAuditRetry.test.js | tee /tmp/rfb144-source-blobs.txt
+          cp src/services/transferService.js /tmp/rfb144-transfer-candidate.js
+          git show 59b58555de22d7eb71772e9423cd938ed3f608c4:src/services/transferService.js > src/services/transferService.js
+          set +e
+          node --test test/archiveAuditRetry.test.js > /tmp/rfb144-before.tap 2>&1
+          before_status=$?
+          set -e
+          cat /tmp/rfb144-before.tap
+          test "$before_status" -eq 1
+          node -e "const s=require('node:fs').readFileSync('/tmp/rfb144-before.tap','utf8');if(!s.includes('# fail 2')||!s.includes('ERR_ASSERTION'))process.exit(1)"
+          cp /tmp/rfb144-transfer-candidate.js src/services/transferService.js
+          node --test test/archiveAuditRetry.test.js > /tmp/rfb144-after.tap 2>&1
+          cat /tmp/rfb144-after.tap
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: archive-audit-retry-before-after
+          path: |
+            /tmp/rfb144-before.tap
+            /tmp/rfb144-after.tap
+            /tmp/rfb144-runtime.txt
+            /tmp/rfb144-source-blobs.txt
