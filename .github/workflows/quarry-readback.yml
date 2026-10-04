@@ -1,0 +1,34 @@
+name: RFB139 numeric readback boundary
+on:
+  push:
+    branches: [validation/quarry-rfb139-readback-20261004]
+permissions:
+  contents: write
+concurrency:
+  group: quarry-rfb139-readback-2e815f63
+  cancel-in-progress: false
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 2e815f63d2f9f8fd2bbcb714fbad1b389877f2d5
+          path: subject
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Execute actual maintained boundary coverage and retain source-only candidate
+        run: python control/repair.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rfb139-readback-evidence
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
