@@ -55,16 +55,21 @@ On every request, the [request-ID middleware](../src/middleware/requestId.js):
 - Trims leading and trailing whitespace from each candidate header value.
 - Accepts a nonempty value of at most 128 characters after trimming, matching
   `^[A-Za-z0-9._:-]+$`.
-- Uses a valid `X-Request-Id` first, otherwise a valid `X-Correlation-Id`.
-  If neither is valid, generates a fresh UUID.
+- Rejects a candidate containing the Bearer token or `X-Admin-Token` supplied
+  on the same request, even when the candidate otherwise matches the format.
+  This runs before authentication and does not change authorization decisions.
+- Uses a valid, credential-independent `X-Request-Id` first, otherwise a valid,
+  credential-independent `X-Correlation-Id`. If neither is acceptable,
+  generates a fresh UUID.
 - Echoes the selected value on both `X-Request-Id` and `X-Correlation-Id`.
 - Exposes it as `req.id` / `req.correlationId` and on error envelopes as
   `error.requestId`.
 
-Values outside this format are ignored after trimming. These checks do not
-identify secrets or personal data, or hash/redact an accepted identifier. An
-API token or account identifier made only of permitted characters can still
-pass them.
+Values outside this format or containing a credential presented with the same
+request are ignored; accepted identifiers are not hashed or redacted. The
+credential exclusion only recognizes those presented Bearer/admin tokens. It
+does not identify unrelated credentials, account identifiers or arbitrary
+personal data, so a syntactically valid ID is not proof that its content is safe.
 
 Supply a fresh opaque ID, such as a UUID, and keep credentials, account details
 and other personal data out of both headers. Omit both headers when a
