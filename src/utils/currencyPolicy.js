@@ -114,6 +114,11 @@ function decimalRatio(value) {
     throw new RangeError('amount is outside the supported numeric range');
   }
   if (numeric === 0) return [0n, 1n];
+  // Safe integer Numbers already are exact decimal integers. In particular,
+  // the identity factors used by rounding need no string or regexp parsing.
+  if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    return [BigInt(value), 1n];
+  }
   const text = typeof value === 'string' ? value.trim() : String(numeric);
   const match = /^([+-]?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(text);
   if (!match) {
