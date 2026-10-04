@@ -119,8 +119,10 @@ function rateLimit(options = {}) {
     if (!entry || now >= entry.resetAt) {
       if (!hasCapacity(now)) {
         const retryAfter = capacityRetryAfter(now);
+        const resetAt = expiries.length ? expiries[0].entry.resetAt : Infinity;
         res.set('X-RateLimit-Limit', String(max));
         res.set('X-RateLimit-Remaining', '0');
+        res.set('X-RateLimit-Reset', String(Math.ceil(resetAt / 1000)));
         res.set('X-RateLimit-Policy', name);
         res.set('Retry-After', String(retryAfter));
         return next(
