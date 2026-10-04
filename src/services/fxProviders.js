@@ -1,6 +1,6 @@
 'use strict';
 
-const { RATES_TO_USD } = require('../config/rates');
+const { RATES_TO_USD, SUPPORTED_CURRENCIES } = require('../config/rates');
 const ApiError = require('../utils/ApiError');
 
 /**
@@ -86,7 +86,7 @@ function listProviders() {
 
 /**
  * Walk providers in order until one returns valid rates accepted by the caller.
- * Malformed rates or a response outside the caller's freshness policy are
+ * Incomplete/malformed rates or a response outside the caller's freshness policy are
  * failed attempts, so neither can hide a usable response from a later provider.
  * @param {{ now?: number, acceptSnapshot?: (snapshot: FxSnapshot) => boolean }} [opts]
  * @returns {FxSnapshot}
@@ -105,6 +105,14 @@ function fetchWithFallback(opts = {}) {
       const values = Object.values(ratesToUsd);
       if (values.length === 0 || values.some((rate) => !Number.isFinite(rate) || rate <= 0)) {
         throw new Error(`Provider ${provider.id} returned invalid rates`);
+      }
+      // One global snapshot feeds every configured pair. Partial provider
+      // responses must not displace the complete cache or hide a usable fallback.
+      // Validate the own-property copy so inherited rates cannot fill gaps.
+      const missingCurrency = SUPPORTED_CURRENCIES.find((code) =>
+        !Object.prototype.hasOwnProperty.call(ratesToUsd, code));
+      if (missingCurrency) {
+        throw new Error(`Provider ${provider.id} omitted supported currency ${missingCurrency}`);
       }
       const normalized = {
         providerId: snapshot.providerId || provider.id,
