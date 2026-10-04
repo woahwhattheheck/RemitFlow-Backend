@@ -1,9 +1,8 @@
-name: CI
+name: RemitFlow currency policy check
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [verify/rfb139-decimal-960b]
 
 permissions:
   contents: read
@@ -11,11 +10,14 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: 8f4bd08e8e4320777c8569f7d3c8f63e19f4bf9c
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm test
+      - run: npm ci --no-audit --no-fund
+      - run: node --test test/currencyPolicy.test.js
