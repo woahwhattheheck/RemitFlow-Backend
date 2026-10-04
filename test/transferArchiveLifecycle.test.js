@@ -56,10 +56,11 @@ async function startArchiveHttp(t) {
   await once(server, 'listening');
   const baseUrl = `http://127.0.0.1:${server.address().port}/api`;
 
-  return async (path, { token, method = 'GET', body, requestId } = {}) => {
+  return async (path, { token, method = 'GET', body, requestId, ifMatch } = {}) => {
     const headers = { Authorization: `Bearer ${token}`, Connection: 'close' };
     if (body) headers['Content-Type'] = 'application/json';
     if (requestId) headers['X-Request-Id'] = requestId;
+    if (ifMatch !== undefined) headers['If-Match'] = ifMatch;
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers,
@@ -566,3 +567,88 @@ test('regression: repeated archive/unarchive does not hide earlier lifecycle tim
   assert.equal(transfer.archiveHistory[2].reason, 'second-archive');
   assertStrictlyIncreasing(transfer.archiveHistory.map((e) => e.at));
 });
+
+// ============================================================================
+// HTTP optimistic-concurrency token preservation
+// ============================================================================
+
+for (const action of ['archive', 'unarchive']) {
+  for (const [kind, value] of [
+    ['number', 0],
+    ['boolean', false],
+    ['array', []],
+    ['object', {}],
+  ]) {
+    test(`HTTP concurrency token: ${action} rejects a supplied ${kind} without changing history`, async (t) => {
+      const request = await startArchiveHttp(t);
+      const transfer = createSample();
+      if (action === 'unarchive') transferService.archiveTransfer(transfer.id);
+      const before = JSON.parse(JSON.stringify(transfer));
+      const beforeAudit = JSON.parse(JSON.stringify(auditService.getEntriesForResource(transfer.id)));
+
+      const response = await request(`/transfers/${transfer.id}/${action}`, {
+        token: archiveWriterA,
+        method: 'POST',
+        body: { expectedUpdatedAt: value, reason: 'stale-type-should-not-write' },
+      });
+
+      assert.equal(response.status, 409);
+      assert.equal(response.body.error.details.code, 'STALE_ARCHIVE_COMMAND');
+      assert.deepEqual(response.body.error.details.expectedUpdatedAt, value);
+      assert.deepEqual(JSON.parse(JSON.stringify(transferService.getTransferOrThrow(transfer.id))), before);
+      assert.deepEqual(JSON.parse(JSON.stringify(auditService.getEntriesForResource(transfer.id))), beforeAudit);
+      const readback = await request(`/transfers/${transfer.id}`, { token: archiveReader });
+      assert.equal(readback.status, 200);
+      assert.deepEqual(readback.body, before);
+    });
+  }
+
+  test(`HTTP concurrency token: ${action} preserves optional values and body/header selection`, async (t) => {
+    const request = await startArchiveHttp(t);
+    const stale = '1999-01-01T00:00:00.000Z';
+    const cases = [
+      { name: 'omitted', options: () => ({ body: { reason: 'optional-token' } }) },
+      { name: 'null', options: () => ({ body: { expectedUpdatedAt: null } }) },
+      { name: 'empty', options: () => ({ body: { expectedUpdatedAt: '' } }) },
+      { name: 'whitespace', options: () => ({ body: { expectedUpdatedAt: '  ' } }) },
+      { name: 'trimmed body wins', options: version => ({
+        body: { expectedUpdatedAt: `  ${version}  ` }, ifMatch: stale,
+      }) },
+      { name: 'bare header', options: version => ({ ifMatch: version }) },
+      { name: 'weak quoted header', options: version => ({ ifMatch: `W/"${version}"` }) },
+      { name: 'header fallback with non-string body', options: version => ({
+        body: { expectedUpdatedAt: false }, ifMatch: version,
+      }) },
+    ];
+
+    for (const scenario of cases) {
+      const transfer = createSample();
+      if (action === 'unarchive') transferService.archiveTransfer(transfer.id);
+      const historyLength = transfer.archiveHistory.length;
+      const response = await request(`/transfers/${transfer.id}/${action}`, {
+        token: archiveWriterA,
+        method: 'POST',
+        ...scenario.options(transfer.updatedAt),
+      });
+      assert.equal(response.status, 200, scenario.name);
+      assert.equal(response.body.archiveHistory.length, historyLength + 1, scenario.name);
+      assert.equal(response.body.archiveHistory.at(-1).action, action, scenario.name);
+    }
+
+    const transfer = createSample();
+    if (action === 'unarchive') transferService.archiveTransfer(transfer.id);
+    const before = JSON.parse(JSON.stringify(transfer));
+    const beforeAudit = JSON.parse(JSON.stringify(auditService.getEntriesForResource(transfer.id)));
+    const response = await request(`/transfers/${transfer.id}/${action}`, {
+      token: archiveWriterA,
+      method: 'POST',
+      body: { expectedUpdatedAt: 0 },
+      ifMatch: stale,
+    });
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.details.code, 'STALE_ARCHIVE_COMMAND');
+    assert.equal(response.body.error.details.expectedUpdatedAt, stale);
+    assert.deepEqual(JSON.parse(JSON.stringify(transferService.getTransferOrThrow(transfer.id))), before);
+    assert.deepEqual(JSON.parse(JSON.stringify(auditService.getEntriesForResource(transfer.id))), beforeAudit);
+  });
+}

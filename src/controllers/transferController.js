@@ -164,7 +164,8 @@ function readExpectedUpdatedAt(req) {
   if (typeof ifMatch === 'string' && ifMatch.trim() !== '') {
     return ifMatch.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
   }
-  return undefined;
+  // Preserve supplied non-string tokens for the service's strict freshness check.
+  return fromBody != null && typeof fromBody !== 'string' ? fromBody : undefined;
 }
 
 /**

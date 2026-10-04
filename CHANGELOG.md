@@ -62,6 +62,13 @@ When preparing a new release:
 
 ### Fixed
 
+- Archive and unarchive HTTP requests preserve supplied non-string
+  `expectedUpdatedAt` values when there is no nonblank `If-Match` fallback.
+  The existing service check rejects those requests with
+  `409 STALE_ARCHIVE_COMMAND` instead of treating them as unversioned writes.
+  Body/header selection, omitted/null/blank optional values, actor attribution,
+  timestamp ordering, and no-token retries keep their existing behavior.
+
 - Archive and unarchive HTTP requests now store the existing keyed actor
   fingerprint in lifecycle history and audit entries, keeping bearer credentials
   out of transfer and audit responses while preserving attribution across cycles.
