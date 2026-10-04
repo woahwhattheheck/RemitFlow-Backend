@@ -282,6 +282,19 @@ behavior. For example, a `16.04 GBP` send has a `0.54 GBP` fee and a
 API amounts remain JavaScript numbers and the FX/Stellar services remain
 mocks. Exact decimal intermediates do not change the external amount format.
 
+Run the focused policy regressions after installing locked dependencies:
+
+```bash
+npm ci --no-audit --no-fund
+node --test test/currencyPolicy.test.js
+```
+
+The [recorded Node.js 22 run](https://github.com/woahwhattheheck/RemitFlow-Backend/actions/runs/37188320218)
+checked out [`8f4bd08e`](https://github.com/woahwhattheheck/RemitFlow-Backend/commit/8f4bd08e8e4320777c8569f7d3c8f63e19f4bf9c)
+and passed all 49 cases with no failures or skips, including decimal ties and
+HTTP preview/transfer agreement for GBP/USD, GBP/EUR, and JPY/EUR. This is the
+focused policy test file; it does not represent a complete-suite run.
+
 ### Transfers
 
 - `POST /api/transfers` — create a transfer.
