@@ -27,7 +27,7 @@ const ACTOR_SECRET = process.env.AUDIT_ACTOR_SECRET
  * Field names (case-insensitive, ignoring `_` / `-`) that must never appear
  * in stored or returned audit changes. Matched on every nested object key.
  */
-const SENSITIVE_KEY_PATTERN = /^(password|passwd|secret|token|api[_-]?key|authorization|auth|bearer|private[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|ssn|cvv|pin|credential|credentials)$/i;
+const SENSITIVE_KEY_PATTERN = /^(password|passwd|secret|token|(?:x[_-]?)?api[_-]?key|authorization|auth|bearer|private[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|ssn|cvv|pin|credential|credentials)$/i;
 
 const REDACTED = '[REDACTED]';
 
