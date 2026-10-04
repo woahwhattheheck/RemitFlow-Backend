@@ -1,8 +1,8 @@
-name: YVB84 actor index validation
+name: YVB80 authenticated v1 receipt integration
 
 on:
   push:
-    branches: ['cedar/yvb84-actor-index-check-7c7100b0']
+    branches: ['cedar/yvb80-v1-check-20261004']
 
 permissions:
   contents: read
@@ -12,42 +12,54 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:
-      YVB_BASELINE: 6cfc7e78a1021fcb73157ca46fe527231b688322
-      YVB_CANDIDATE: 7ad92b59435f06f99a81772b0b0728e6d524df24
+      YVB_BASELINE: fcb73610d3252b61280a279df7c49b617d17e703
+      YVB_CANDIDATE: e5ac9060f1fd771f1a91b89ad6c55823b9dcfef7
       NODE_ENV: test
-      ANALYTICS_CURSOR_SECRET: synthetic-yvb84-benchmark-only
       NODE_PATH: ${{ github.workspace }}/node_modules
     steps:
       - uses: actions/checkout@v4
         with:
           repository: woahwhattheheck/YieldVault-Backend-1
-          ref: 7ad92b59435f06f99a81772b0b0728e6d524df24
+          ref: e5ac9060f1fd771f1a91b89ad6c55823b9dcfef7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Original dependency manifest
+        shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$YVB_CANDIDATE"
           npm install --no-audit --no-fund
-          npm ls --depth=0
-      - name: Fetch unchanged baseline for the remaining benchmark
+          npm ls --depth=0 | tee "$RUNNER_TEMP/yvb80-dependencies.txt"
+          node --version | tee "$RUNNER_TEMP/yvb80-node.txt"
+      - name: Retain baseline HTTP response failures
+        shell: bash
         run: |
           git fetch --no-tags --depth=1 origin "$YVB_BASELINE"
-          git worktree add --detach "$RUNNER_TEMP/yvb84-baseline" FETCH_HEAD
-      - name: Paired actual-service benchmark
+          git worktree add --detach "$RUNNER_TEMP/yvb80-baseline" FETCH_HEAD
+          cp test/contractValidation.test.js "$RUNNER_TEMP/yvb80-baseline/test/contractValidation.test.js"
+          cd "$RUNNER_TEMP/yvb80-baseline"
+          set +e
+          node --test --test-concurrency=1 test/contractValidation.test.js > "$RUNNER_TEMP/yvb80-baseline.tap" 2>&1
+          result=$?
+          set -e
+          printf '%s\n' "$result" > "$RUNNER_TEMP/yvb80-baseline-exit.txt"
+          cat "$RUNNER_TEMP/yvb80-baseline.tap"
+          echo "Baseline process exit: $result (measurement; interpreted alongside assertions)"
+      - name: Required complete candidate suite
+        shell: bash
         run: |
-          node scripts/benchmark-analytics-actor-index.cjs "$RUNNER_TEMP/yvb84-baseline" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/yvb84-benchmark.json"
-          cat "$RUNNER_TEMP/yvb84-benchmark.json"
-          node <<'NODE'
-          const fs = require('node:fs');
-          const assert = require('node:assert/strict');
-          const report = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/yvb84-benchmark.json', 'utf8'));
-          assert.equal(report.results.length, 18);
-          for (let i = 0; i < report.results.length; i += 2) {
-            const [before, after] = report.results.slice(i, i + 2);
-            assert.equal(before.resultSha256, after.resultSha256);
-            assert.equal(after.pages, 1);
-            assert.equal(after.scanned, after.matches);
-            assert.ok(before.scanned > after.scanned);
-          }
-          NODE
+          set -o pipefail
+          npm test -- --test-concurrency=1 | tee "$RUNNER_TEMP/yvb80-candidate.tap"
+      - name: Unchanged response fixtures
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run validate:contracts | tee "$RUNNER_TEMP/yvb80-fixtures.txt"
+          git diff --exit-code -- src test README.md package.json
+      - name: Retain source-pinned results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yvb80-authenticated-v1-receipts-e5ac9060
+          path: ${{ runner.temp }}/yvb80-*.*
+          retention-days: 14
