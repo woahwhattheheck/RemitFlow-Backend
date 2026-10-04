@@ -158,7 +158,8 @@ function queryTransfers({
  * @param {number} seq
  * @returns {string|null}
  */
-function positionKeyAt(seq) {
+function positionKeyAt(seq, auth) {
+  assertScopes(auth, SCOPES.TRANSFERS_READ);
   const record = store.transferIndex.recordAt(seq);
   return record ? record.key : null;
 }
