@@ -451,7 +451,8 @@ function bulkMutate(action, ids, requestId, auth) {
       const transfer = handler(id, requestId, auth);
       return { id, ok: true, transfer };
     } catch (err) {
-      const status = err && err.statusCode ? err.statusCode : 500;
+      const isApiError = err instanceof ApiError;
+      const status = isApiError ? err.statusCode : 500;
       // Collapse not-found / malformed into one code. Lifecycle conflicts keep
       // their own code so a client can retry sensibly without learning whether
       // an unknown id existed.
@@ -466,7 +467,8 @@ function bulkMutate(action, ids, requestId, auth) {
         error: {
           code,
           status,
-          message: status === 404 ? transferNotFoundError().message : (err.message || 'error'),
+          message: status === 404 ? transferNotFoundError().message
+            : (isApiError ? err.message : 'Internal server error'),
         },
       };
     }
