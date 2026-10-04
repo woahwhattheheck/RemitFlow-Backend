@@ -287,6 +287,59 @@ test('provider failure rolls back before terminal commit and releases retry rese
   assert.equal(recovered.version, 2);
 });
 
+test('provider operation ids are opaque and collision-safe for actor/key delimiters', () => {
+  const transfer = transferService.createTransfer(PAYLOAD);
+  const observed = [];
+
+  settlementWorker.settleClaim = (operationId) => {
+    settleCalls += 1;
+    observed.push(operationId);
+    throw new Error('provider unavailable');
+  };
+
+  const attempts = [
+    lifecycle('c', transfer.version, 'a:b'),
+    lifecycle('b:c', transfer.version, 'a'),
+    lifecycle('c', transfer.version, 'a:b'),
+  ];
+  for (const ctx of attempts) {
+    assert.throws(
+      () => transferService.claimTransfer(transfer.id, 'provider-failure', ctx),
+      /provider unavailable/
+    );
+  }
+
+  assert.equal(observed.length, 3);
+  assert.notEqual(observed[0], observed[1], 'distinct actor/key tuples must not collide');
+  assert.equal(observed[0], observed[2], 'an exact retry must reuse the provider key');
+  for (const operationId of observed) {
+    assert.match(operationId, /^settlement_[0-9a-f]{64}$/);
+    assert.ok(!operationId.includes('a:b'));
+    assert.ok(!operationId.includes('b:c'));
+  }
+  assert.equal(store.transfers.get(transfer.id).status, 'pending');
+  assert.equal(store.transfers.get(transfer.id).version, 1);
+  assert.equal(store.lifecycleIdempotency.size, 0);
+  assert.equal(store.lifecycleLeases.size, 0);
+});
+
+test('successful claim does not expose bearer token or idempotency key in settlementOperationId', () => {
+  const transfer = transferService.createTransfer(PAYLOAD);
+  const actor = 'secret:bearer-token';
+  const key = 'client:retry:key';
+
+  const claimed = transferService.claimTransfer(
+    transfer.id,
+    'opaque-operation-id',
+    lifecycle(key, transfer.version, actor)
+  );
+
+  assert.match(claimed.settlementOperationId, /^settlement_[0-9a-f]{64}$/);
+  assert.ok(!claimed.settlementOperationId.includes(actor));
+  assert.ok(!claimed.settlementOperationId.includes(key));
+  assert.equal(settleCalls, 1);
+});
+
 test('completed cancellation is idempotent and cannot be overwritten', () => {
   const transfer = transferService.createTransfer(PAYLOAD);
   const ctx = lifecycle('cancel-once', transfer.version);
