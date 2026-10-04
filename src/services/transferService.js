@@ -379,6 +379,9 @@ function normaliseArchiveOptions(optionsOrRequestId) {
     };
   }
   const reason = optionsOrRequestId.reason;
+  if (reason !== null && typeof reason === 'object') {
+    throw ApiError.badRequest('reason must not be an object or array');
+  }
   return {
     requestId: optionsOrRequestId.requestId,
     actor: optionsOrRequestId.actor == null ? null : String(optionsOrRequestId.actor),
