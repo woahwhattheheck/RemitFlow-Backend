@@ -41,7 +41,11 @@ function canonicalize(value) {
     return JSON.stringify(value) ?? 'null';
   }
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalize).join(',')}]`;
+    // Visit every numeric slot: map() skips holes and can hash [empty] as [].
+    const items = Array.from(
+      { length: value.length }, (_, index) => canonicalize(value[index])
+    );
+    return `[${items.join(',')}]`;
   }
   const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
   return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`;
