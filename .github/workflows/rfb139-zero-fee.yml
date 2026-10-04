@@ -1,0 +1,24 @@
+name: Focused fee configuration and currency policy
+on:
+  push:
+    branches:
+      - validation/rfb139-zero-fee-20261004-4d43
+permissions:
+  contents: read
+jobs:
+  fee-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 452a512d8ae1d739336dcb8e4bd45e17300e0597
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Record product source
+        run: git rev-parse HEAD
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Run maintained fee and currency-policy regressions
+        run: node --test test/config.test.js test/currencyPolicy.test.js
