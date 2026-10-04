@@ -1,0 +1,78 @@
+name: Readiness probe overlap and recovery
+on:
+  push:
+    branches: [validation/rf140-probe-sharing-delta]
+    paths: [.github/workflows/rf140-probe-sharing-delta.yml]
+permissions:
+  contents: write
+concurrency:
+  group: rf140-probe-sharing-delta
+  cancel-in-progress: false
+jobs:
+  readiness:
+    if: github.repository == 'woahwhattheheck/RemitFlow-Backend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      CI: 'true'
+      NODE_ENV: test
+      SOURCE: 67c4e52d8bcb6b286922104702e717c75cdfa053
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e879b8eea639a7f0b4fbd89641501597ba25e8f3
+          path: carrier
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 67c4e52d8bcb6b286922104702e717c75cdfa053
+          path: subject
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Reproduce and repair only the readiness scope
+        working-directory: subject
+        run: |
+          set -euo pipefail
+          mkdir -p ../evidence
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          node --version > ../evidence/node-version.txt
+          npm ci --no-audit --no-fund > ../evidence/install.log 2>&1
+          python ../carrier/work/rf140-delta/prepare.py --test-only
+          set +e
+          node --unhandled-rejections=strict --test test/readinessProbeSharing.test.js > ../evidence/before.tap 2>&1
+          baseline=$?
+          set -e
+          echo "$baseline" > ../evidence/before-exit.txt
+          test "$baseline" = 1
+          grep -q '# tests 4' ../evidence/before.tap
+          grep -q '# fail 4' ../evidence/before.tap
+          cp test/readinessProbeSharing.test.js ../evidence/regression.js
+          rm src/services/inFlightProbe.js test/readinessProbeSharing.test.js
+          python ../carrier/work/rf140-delta/prepare.py
+          cmp test/readinessProbeSharing.test.js ../evidence/regression.js
+          node --unhandled-rejections=strict --test test/dependencyHealth.test.js test/readinessProbeSharing.test.js 2>&1 | tee ../evidence/after.tap
+          git diff --exit-code -- test/dependencyHealth.test.js package.json package-lock.json
+          git diff > ../evidence/source.patch
+          git config user.name woahwhattheheck
+          git config user.email brycembusiness2@gmail.com
+          git add src/services/dependencyHealthService.js src/services/inFlightProbe.js test/readinessProbeSharing.test.js
+          git commit -m "fix: bound unfinished readiness probes across overlapping requests [skip ci]"
+          git rev-parse HEAD HEAD^{tree} HEAD^ > ../evidence/identity.txt
+          git ls-files -s src/services/dependencyHealthService.js src/services/inFlightProbe.js test/readinessProbeSharing.test.js > ../evidence/source-blobs.txt
+          git diff --exit-code > ../evidence/tracked-source-diff.txt
+      - name: Retain the tested code on a new result ref
+        working-directory: subject
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD^)" = "$SOURCE"
+          git push origin HEAD:refs/heads/validation/rf140-probe-sharing-delta-result
+      - name: Retain focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rf140-probe-sharing-delta
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
