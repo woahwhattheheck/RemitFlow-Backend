@@ -164,7 +164,15 @@ function roundToCurrency(amount, code, options = {}) {
   if (rounded > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new RangeError('amount is outside the supported numeric range');
   }
-  return (negative ? -Number(rounded) : Number(rounded)) / factor;
+  const result = (negative ? -Number(rounded) : Number(rounded)) / factor;
+  // A safe integer number of cents need not survive division as a Number.
+  // Compare its decimal serialization exactly, not another float multiply.
+  const [readbackN, readbackD] = decimalRatio(result);
+  const signedUnits = negative ? -rounded : rounded;
+  if (readbackN * BigInt(factor) !== signedUnits * readbackD) {
+    throw new RangeError('amount is outside the supported numeric range');
+  }
+  return result;
 }
 
 /** Amount input is numeric or textual; objects and arrays are never coerced. */
@@ -225,7 +233,14 @@ function canonicalizeAmount(amount, code, options = {}) {
     return { ok: false, errors };
   }
 
-  const canonical = roundToCurrency(amount, meta.code);
+  let canonical;
+  try {
+    canonical = roundToCurrency(amount, meta.code);
+  } catch (err) {
+    if (!(err instanceof RangeError)) throw err;
+    errors.push('amount is outside the supported numeric range');
+    return { ok: false, errors };
+  }
 
   if (canonical < meta.minAmount) {
     errors.push(`amount must be at least ${meta.minAmount} ${meta.code}`);

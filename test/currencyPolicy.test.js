@@ -524,3 +524,51 @@ for (const [amount, from, to, fee, receiveAmount] of [
     assert.equal(transfer.body.receiveAmount, quote.body.receiveAmount);
   });
 }
+
+
+// Decimal cents must survive the existing Number-valued API representation.
+test('numeric readback rejects cent values rounded by the Number representation', () => {
+  for (const code of ['USD', 'EUR', 'GBP', 'INR', 'NGN', 'PHP', 'MXN', 'KES']) {
+    for (const amount of ['90071992547409.91', '70368744177664.01', '-70368744177664.01']) {
+      assert.throws(() => currencyPolicy.roundToCurrency(amount, code),
+        (error) => error instanceof RangeError && /numeric range/.test(error.message));
+    }
+  }
+});
+
+test('numeric readback returns structured canonical errors without throwing', () => {
+  for (const amount of ['90071992547409.91', '70368744177664.01']) {
+    assert.deepEqual(currencyPolicy.canonicalizeAmount(amount, 'USD', { enforceMax: false }), {
+      ok: false, errors: ['amount is outside the supported numeric range'],
+    });
+    assert.deepEqual(currencyPolicy.validateTransferPair(amount, 'USD', 'EUR', { enforceMax: false }),
+      ['amount is outside the supported numeric range']);
+  }
+});
+
+test('numeric readback retains representable decimal and whole-yen boundaries', () => {
+  for (const amount of ['90071992547409.89', '90071992547409.88', '90071992547409.90', '0.01', '1.01']) {
+    const result = currencyPolicy.canonicalizeAmount(amount, 'USD', { enforceMax: false });
+    assert.equal(result.ok, true);
+    const text = JSON.parse(JSON.stringify(result.amount)).toString();
+    const [whole, fraction = ''] = text.split('.');
+    const cents = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
+    assert.equal(cents, BigInt(amount.replace('.', '')));
+  }
+  assert.equal(currencyPolicy.roundToCurrency(Number.MAX_SAFE_INTEGER, 'JPY'), Number.MAX_SAFE_INTEGER);
+  assert.equal(currencyPolicy.roundToCurrency(-Number.MAX_SAFE_INTEGER, 'JPY'), -Number.MAX_SAFE_INTEGER);
+  assert.ok(Object.is(currencyPolicy.roundToCurrency('-0.001', 'USD'), -0));
+});
+
+test('numeric readback returns HTTP 400 before transfer or audit effects', async (t) => {
+  const submitPayment = t.mock.method(stellarService, 'submitPayment');
+  for (const amount of ['90071992547409.91', '70368744177664.01']) {
+    const response = await fetchJson(`/api/quote?amount=${amount}&from=USD&to=EUR`);
+    assert.equal(response.status, 400);
+    assert.ok(response.body.error.details.errors.includes('amount is outside the supported numeric range'));
+  }
+  assert.equal(submitPayment.mock.callCount(), 0);
+  assert.equal(store.transfers.size, 0);
+  assert.equal(store.idempotency.size, 0);
+  assert.equal(auditService.countEntries(), 0);
+});

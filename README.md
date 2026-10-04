@@ -405,3 +405,18 @@ curl -H "Authorization: Bearer $TOKEN" "http://localhost:3000/api/audit"
 curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:3000/api/audit?resourceId=<id>&limit=20"
 ```
+
+
+### Exact numeric amount boundary
+
+The currency policy rejects an amount when its rounded minor-unit integer cannot
+round-trip through the existing Number-valued JSON API without changing its
+decimal value. `Number.MAX_SAFE_INTEGER` minor units is an upper bound, not a
+promise that every smaller cent amount is representable. For example,
+`90071992547409.91` USD would serialize as `90071992547409.9`; it now produces the
+existing numeric-range validation error rather than silently losing a cent.
+Representable neighboring values and whole-number JPY retain their existing
+behavior. Direct rounding throws `RangeError`; canonical and HTTP validation
+retain structured errors. No string-valued API migration is introduced.
+
+Focused coverage: `node --test test/currencyPolicy.test.js`.
