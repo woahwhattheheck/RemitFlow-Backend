@@ -74,9 +74,12 @@ Canonical catalog: `src/config/scopes.js`. Full route matrix: [`docs/SCOPE_MATRI
 | `audit:read` | `GET /api/audit` |
 | `admin:read` | `GET /api/admin/diagnostics` (also granted by the legacy `ADMIN_API_KEY` / `X-Admin-Token`) |
 
-Scopes are enforced at the route **and** again at the service boundary. Missing,
-malformed, and unknown transfer ids share one `404 Transfer not found` response
-so callers cannot enumerate identifiers by status or message shape.
+HTTP controllers pass `authFromRequest(req)` so scopes are enforced at the route
+**and** again at the service boundary. Trusted internal callers can omit that
+context, so new request adapters must pass it explicitly; see the
+[service integration contract](docs/SCOPE_MATRIX.md#service-integration).
+Missing, malformed, and unknown transfer ids share one `404 Transfer not found`
+response so callers cannot enumerate identifiers by status or message shape.
 
 ### Public endpoints (no token required)
 
