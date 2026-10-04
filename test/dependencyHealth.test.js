@@ -378,6 +378,17 @@ test('readiness redacts raw error messages and secrets from responses', async ()
   assert.equal(body.checks.store.stack, undefined);
 });
 
+test('readiness keeps reason codes scoped to their dependency', async () => {
+  dependencyHealth.forceDependencyState('payments', {
+    mode: 'fail',
+    reason: dependencyHealth.REASON.STORE_UNAVAILABLE,
+  });
+
+  const result = await dependencyHealth.runCheck('payments', 50);
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, dependencyHealth.REASON.PAYMENTS_UNAVAILABLE);
+});
+
 test('unit redact path never leaks custom throw messages', async () => {
   dependencyHealth.forceDependencyState('payments', {
     mode: 'throw',
