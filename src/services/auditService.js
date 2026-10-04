@@ -78,9 +78,11 @@ function getEntries(auth) {
 /**
  * Return only the entries for a specific resource id.
  * @param {string} resourceId
+ * @param {{ scopes?: string[] }|null} [auth] - optional service authorization context
  * @returns {Array<object>}
  */
-function getEntriesForResource(resourceId) {
+function getEntriesForResource(resourceId, auth) {
+  assertScopes(auth, SCOPES.AUDIT_READ);
   // A nullish id matches no resource. Guarded explicitly because the index
   // treats a null group key as "the whole index".
   if (resourceId == null || resourceId === '') return [];
