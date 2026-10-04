@@ -1,0 +1,53 @@
+name: RFB143 bulk error boundary
+on:
+  push:
+    branches: [validation/copperfin-rfb143-bulk-20261004]
+permissions:
+  contents: write
+concurrency:
+  group: copperfin-rfb143-bulk-20261004
+  cancel-in-progress: false
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: carrier
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: b0c161f1c9c8200d762e5810ba82c15995a1be0a
+          path: subject
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install existing locked dependencies
+        working-directory: subject
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Reproduce and repair real bulk HTTP handling
+        working-directory: subject
+        env:
+          NODE_ENV: test
+        run: python ../carrier/repair_rfb143.py
+      - name: Retain code-only candidate on new ref
+        working-directory: subject
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, os, subprocess
+          token = os.environ.pop('GH_PUSH_TOKEN')
+          auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
+          env = os.environ.copy()
+          env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader', GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + auth)
+          subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/validation/rfb143-bulk-errors-copperfin-result'], env=env, check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rfb143-bulk-error-evidence
+          path: subject/evidence/
+          if-no-files-found: error
