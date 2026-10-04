@@ -84,7 +84,11 @@ function refresh(now, policy) {
     now,
     acceptSnapshot(candidate) {
       const expiresAt = candidate.fetchedAt + ttlMs();
-      if (!Number.isFinite(candidate.fetchedAt) || !Number.isFinite(expiresAt)) {
+      // A future provider timestamp would extend freshness beyond the local
+      // TTL. Reject it instead of clamping away its provenance so a usable
+      // fallback can still win.
+      if (!Number.isFinite(candidate.fetchedAt) || !Number.isFinite(expiresAt) ||
+          candidate.fetchedAt > now) {
         return false;
       }
       const status = classify({ expiresAt }, now);
