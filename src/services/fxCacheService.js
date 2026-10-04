@@ -75,14 +75,18 @@ function decorate(entry, now, extra) {
  * Pull from providers (counted), accepting only snapshots within policy before
  * choosing a provider or replacing the cache. A successful fetch is not proof
  * that the provider's timestamp is current.
- * @param {number} now
+ * @param {() => number} readNow
  * @param {'reject_stale'|'allow_stale'} policy
  */
-function refresh(now, policy) {
+function refresh(readNow, policy) {
   providerFetchCount += 1;
+  let acceptedAt;
   const snapshot = fxProviders.fetchWithFallback({
-    now,
+    // Each fallback starts at the current time. A slow earlier provider must
+    // not make the next provider inherit an already-expired request timestamp.
+    get now() { return readNow(); },
     acceptSnapshot(candidate) {
+      const now = readNow();
       const expiresAt = candidate.fetchedAt + ttlMs();
       // A future provider timestamp would extend freshness beyond the local
       // TTL. Reject it instead of clamping away its provenance so a usable
@@ -92,7 +96,9 @@ function refresh(now, policy) {
         return false;
       }
       const status = classify({ expiresAt }, now);
-      return status === 'fresh' || (policy === 'allow_stale' && status === 'stale');
+      const accepted = status === 'fresh' || (policy === 'allow_stale' && status === 'stale');
+      if (accepted) acceptedAt = now;
+      return accepted;
     },
   });
   const entry = {
@@ -102,7 +108,7 @@ function refresh(now, policy) {
     expiresAt: snapshot.fetchedAt + ttlMs(),
   };
   cache.set(CACHE_KEY, entry);
-  return decorate(entry, now, { cacheHit: false, source: 'provider' });
+  return decorate(entry, acceptedAt, { cacheHit: false, source: 'provider' });
 }
 
 /**
@@ -122,7 +128,10 @@ function refresh(now, policy) {
  * @returns {ReturnType<typeof decorate>}
  */
 function getSnapshot(opts = {}) {
-  const now = opts.now != null ? opts.now : Date.now();
+  // An explicit time remains a deterministic snapshot for callers/tests.
+  // Normal requests must account for time spent inside synchronous providers.
+  const readNow = opts.now != null ? () => opts.now : () => Date.now();
+  const now = readNow();
   const policy = opts.policy || 'reject_stale';
   const entry = cache.get(CACHE_KEY);
 
@@ -145,13 +154,14 @@ function getSnapshot(opts = {}) {
 
   inflight.add(CACHE_KEY);
   try {
-    return refresh(now, policy);
+    return refresh(readNow, policy);
   } catch (err) {
     // Provider path failed. Under allow_stale, a within-grace entry is still
     // usable for display — but it is visibly stale. Under reject_stale we
     // never price with it.
-    if (entry && classify(entry, now) === 'stale' && policy === 'allow_stale') {
-      return decorate(entry, now, { cacheHit: true, source: 'cache-stale-outage' });
+    const failedAt = readNow();
+    if (entry && classify(entry, failedAt) === 'stale' && policy === 'allow_stale') {
+      return decorate(entry, failedAt, { cacheHit: true, source: 'cache-stale-outage' });
     }
     throw err;
   } finally {

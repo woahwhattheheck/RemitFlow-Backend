@@ -167,7 +167,8 @@ function getQuote(amount, from, to, opts = {}) {
     sendAmount: numericAmount,
     fee,
     amountAfterFee,
-    rate: money.round(rate),
+    // Keep the conversion ratio; money precision applies to amounts only.
+    rate,
     receiveAmount,
     stale: snapshot.stale,
     freshness: freshnessFromSnapshot(snapshot),

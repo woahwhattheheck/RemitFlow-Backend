@@ -9,7 +9,7 @@ const fxProviders = require('../src/services/fxProviders');
 const ORIGINAL_TTL = config.fx.cacheTtlMs;
 const ORIGINAL_GRACE = config.fx.staleGraceMs;
 const NOW = 10_000_000;
-const RATES = { USD: 1, EUR: 1.08 };
+const { RATES_TO_USD: RATES } = require('../src/config/rates');
 const isProvidersDown = (err) => err.statusCode === 503 &&
   err.details && err.details.code === 'FX_PROVIDERS_DOWN';
 
@@ -80,7 +80,7 @@ test('future provider data cannot replace a stale display cache or extend its gr
   const fetchedAt = NOW - 1_500;
   fxCacheService.seed({ fetchedAt, ratesToUsd: RATES, providerId: 'cached' });
   fxProviders.setProviders([
-    { id: 'future', fetch: () => ({ ratesToUsd: { USD: 1, EUR: 2 }, fetchedAt: NOW + 86_400_000 }) },
+    { id: 'future', fetch: () => ({ ratesToUsd: { ...RATES, EUR: 2 }, fetchedAt: NOW + 86_400_000 }) },
   ]);
   assert.throws(
     () => fxCacheService.getSnapshot({ now: NOW, policy: 'reject_stale' }),

@@ -134,7 +134,8 @@ function getPair(from, to, opts = {}) {
   return {
     from: fromCode,
     to: toCode,
-    rate: money.round(rate),
+    // Applying minor-unit rounding here can turn a valid FX rate into zero.
+    rate,
     freshness: {
       status: snapshot.status,
       stale: snapshot.stale,

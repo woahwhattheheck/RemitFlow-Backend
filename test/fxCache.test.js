@@ -376,7 +376,7 @@ test('HTTP invalid FX responses create no records and allow the same transfer ke
     assert.equal(recovered.status, 201);
     assert.equal(transfer.rateStale, false);
     assert.equal(transfer.rateProvider, 'primary');
-    assert.equal(transfer.rate, 0.93);
+    assert.equal(transfer.rate, RATES_TO_USD.USD / RATES_TO_USD.EUR);
     assert.equal(transfer.receiveAmount, 90.93);
     assert.equal(store.transfers.size, 1);
     assert.equal(store.quotes.size, 1);
@@ -758,7 +758,7 @@ test('transfer mint completion retains only the configured stale grace opt-in', 
   const clock = delayedFxProvider(t, config.fx.cacheTtlMs);
   const transfer = transferService.createTransfer(PAYLOAD, 'req-delayed-allowed');
   assert.equal(transfer.rateStale, true);
-  assert.equal(transfer.rate, 0.93);
+  assert.equal(transfer.rate, RATES_TO_USD.USD / RATES_TO_USD.EUR);
   assert.equal(transfer.receiveAmount, 90.93);
 
   clock.delayMs = config.fx.cacheTtlMs + config.fx.staleGraceMs;
