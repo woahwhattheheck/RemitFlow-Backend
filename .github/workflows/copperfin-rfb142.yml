@@ -1,0 +1,53 @@
+name: RFB142 audit array integrity
+on:
+  push:
+    branches: [validation/copperfin-rfb142-array-20261004]
+permissions:
+  contents: write
+concurrency:
+  group: copperfin-rfb142-array-20261004
+  cancel-in-progress: false
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: carrier
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: d2962a3e9ea3778c02b2d941b2a7553da10d5deb
+          path: subject
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install existing locked dependencies
+        working-directory: subject
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Reproduce and repair actual audit integrity
+        working-directory: subject
+        env:
+          NODE_ENV: test
+        run: python ../carrier/repair_rfb142.py
+      - name: Retain code-only candidate on new ref
+        working-directory: subject
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, os, subprocess
+          token = os.environ.pop('GH_PUSH_TOKEN')
+          auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
+          env = os.environ.copy()
+          env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader', GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + auth)
+          subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/validation/rfb142-array-integrity-copperfin-result'], env=env, check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rfb142-array-integrity-evidence
+          path: subject/evidence/
+          if-no-files-found: error
