@@ -1,0 +1,45 @@
+name: Focused archive settlement regression
+on:
+  push:
+    branches: [rivet/rfb145-archive-check-20261004]
+    paths:
+      - .github/workflows/rfb145-archive-race.yml
+      - validation/rfb145-archive-race.py
+permissions:
+  contents: write
+jobs:
+  archive-race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          ref: b67b7e7639bada58642a12abffa6da6ac5293c5b
+          path: product
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product/package-lock.json
+      - name: Install existing locked dependencies
+        working-directory: product
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Reproduce and repair exact archive race
+        working-directory: product
+        env:
+          EVIDENCE_DIR: ${{ github.workspace }}/evidence
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git config user.name woahwhattheheck
+          git config user.email 293286387+woahwhattheheck@users.noreply.github.com
+          python ../control/validation/rfb145-archive-race.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rfb145-archive-race
+          path: evidence
+          if-no-files-found: warn
+          retention-days: 14
