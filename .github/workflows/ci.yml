@@ -1,8 +1,8 @@
-name: YVB84 actor index validation
+name: YVB84 v1 receipt composition
 
 on:
   push:
-    branches: ['cedar/yvb84-actor-index-check-7c7100b0']
+    branches: ['cedar/yvb84-v1-receipt-check-cd79']
 
 permissions:
   contents: read
@@ -12,42 +12,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:
-      YVB_BASELINE: 6cfc7e78a1021fcb73157ca46fe527231b688322
-      YVB_CANDIDATE: 7ad92b59435f06f99a81772b0b0728e6d524df24
+      YVB_CANDIDATE: efb3ca93916e889bd50384fb68425c10da38b68e
       NODE_ENV: test
-      ANALYTICS_CURSOR_SECRET: synthetic-yvb84-benchmark-only
-      NODE_PATH: ${{ github.workspace }}/node_modules
+      ANALYTICS_CURSOR_SECRET: synthetic-yvb84-receipt-composition
     steps:
       - uses: actions/checkout@v4
         with:
           repository: woahwhattheheck/YieldVault-Backend-1
-          ref: 7ad92b59435f06f99a81772b0b0728e6d524df24
+          ref: efb3ca93916e889bd50384fb68425c10da38b68e
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Original dependency manifest
         run: |
           test "$(git rev-parse HEAD)" = "$YVB_CANDIDATE"
+          node --version
           npm install --no-audit --no-fund
           npm ls --depth=0
-      - name: Fetch unchanged baseline for the remaining benchmark
-        run: |
-          git fetch --no-tags --depth=1 origin "$YVB_BASELINE"
-          git worktree add --detach "$RUNNER_TEMP/yvb84-baseline" FETCH_HEAD
-      - name: Paired actual-service benchmark
-        run: |
-          node scripts/benchmark-analytics-actor-index.cjs "$RUNNER_TEMP/yvb84-baseline" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/yvb84-benchmark.json"
-          cat "$RUNNER_TEMP/yvb84-benchmark.json"
-          node <<'NODE'
-          const fs = require('node:fs');
-          const assert = require('node:assert/strict');
-          const report = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/yvb84-benchmark.json', 'utf8'));
-          assert.equal(report.results.length, 18);
-          for (let i = 0; i < report.results.length; i += 2) {
-            const [before, after] = report.results.slice(i, i + 2);
-            assert.equal(before.resultSha256, after.resultSha256);
-            assert.equal(after.pages, 1);
-            assert.equal(after.scanned, after.matches);
-            assert.ok(before.scanned > after.scanned);
-          }
-          NODE
+      - name: Required maintained suite on the composed source
+        run: npm test -- --test-concurrency=1
