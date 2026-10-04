@@ -273,8 +273,14 @@ quote. A zero or negative payout after fees and destination rounding is
 rejected with `400` by preview and transfer creation, before settlement or
 transfer insertion.
 
-The demo retains JavaScript-number arithmetic and mock FX/Stellar services;
-numeric strings do not add arbitrary-precision decimal accounting.
+Fee calculation and FX conversion retain their decimal inputs until one
+rounding step to the destination minor units. Nonnegative funds round half up;
+negative intermediate values keep the existing ties-toward-positive-infinity
+behavior. For example, a `16.04 GBP` send has a `0.54 GBP` fee and a
+`19.69 USD` payout at the mock `1.27` rate (`15.50 × 1.27 = 19.685`).
+
+API amounts remain JavaScript numbers and the FX/Stellar services remain
+mocks. Exact decimal intermediates do not change the external amount format.
 
 ### Transfers
 

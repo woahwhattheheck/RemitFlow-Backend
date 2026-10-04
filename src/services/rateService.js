@@ -57,9 +57,13 @@ function getRate(from, to) {
  * @returns {number}
  */
 function convert(amount, from, to) {
-  const rate = getRate(from, to);
+  getRate(from, to); // Preserve unsupported-currency validation.
+  const fromCode = currency.normalize(from);
   const toCode = currency.normalize(to);
-  return currencyPolicy.roundToCurrency(amount * rate, toCode);
+  return currencyPolicy.roundToCurrency(amount, toCode, {
+    multiplier: RATES_TO_USD[fromCode],
+    divisor: RATES_TO_USD[toCode],
+  });
 }
 
 /**

@@ -14,6 +14,7 @@ const { validateCreateTransfer } = require('../src/validators/transferValidator'
 const { validateQuoteQuery } = require('../src/validators/quoteValidator');
 const createApp = require('../src/app');
 const { store, reset } = require('../src/store');
+const money = require('../src/utils/money');
 
 // ── Unit: policy table ──────────────────────────────────────────────────────
 
@@ -112,6 +113,23 @@ test('roundToCurrency uses destination minor units', () => {
   assert.equal(currencyPolicy.roundToCurrency(10.129, 'USD'), 10.13);
   assert.equal(currencyPolicy.roundToCurrency(10.6, 'JPY'), 11);
   assert.equal(currencyPolicy.roundToCurrency(10.4, 'JPY'), 10);
+});
+
+test('decimal rounding distinguishes exact ties from genuinely lower amounts', () => {
+  for (const [amount, code, expected] of [
+    ['10.075', 'USD', 10.08],
+    ['19.685', 'USD', 19.69],
+    ['19.684999999999999', 'USD', 19.68],
+    ['19.685000000000001', 'USD', 19.69],
+    ['-10.075', 'USD', -10.07],
+    ['-10.075000000000001', 'USD', -10.08],
+    ['2.5', 'JPY', 3],
+    ['-2.5', 'JPY', -2],
+    ['-2.500000000000001', 'JPY', -3],
+  ]) {
+    assert.equal(currencyPolicy.roundToCurrency(amount, code), expected);
+  }
+  assert.equal(money.percentage(403, 2.5, 'USD'), 10.08);
 });
 
 // ── Validators share the policy ─────────────────────────────────────────────
@@ -222,6 +240,36 @@ async function fetchJson(path, options = {}) {
   const res = await fetch(`${baseUrl}${path}`, options);
   const body = await res.json();
   return { status: res.status, body };
+}
+
+for (const [amount, from, to, fee, afterFee, receiveAmount] of [
+  [16.04, 'GBP', 'USD', 0.54, 15.5, 19.69],
+  [4.14, 'GBP', 'EUR', 0.36, 3.78, 4.45],
+  [384, 'JPY', 'EUR', 6, 378, 2.35],
+]) {
+  test(`decimal FX rounding agrees for conversion, preview and transfer: ${from}/${to}`, async () => {
+    assert.equal(rateService.convert(afterFee, from, to), receiveAmount);
+    const quote = await fetchJson(`/api/quote?amount=${amount}&from=${from}&to=${to}`);
+    const transfer = await fetchJson('/api/transfers', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token-admin',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `idem-decimal-fx-${from}-${to}`,
+      },
+      body: JSON.stringify({
+        senderName: 'Alice', recipientName: 'Bob', amount, from, to,
+      }),
+    });
+    assert.equal(quote.status, 200);
+    assert.equal(transfer.status, 201);
+    assert.equal(quote.body.fee, fee);
+    assert.equal(quote.body.amountAfterFee, afterFee);
+    assert.equal(quote.body.receiveAmount, receiveAmount);
+    assert.equal(transfer.body.fee, fee);
+    assert.equal(transfer.body.sendAmount, amount);
+    assert.equal(transfer.body.receiveAmount, receiveAmount);
+  });
 }
 
 for (const field of ['amount', 'from', 'to']) {

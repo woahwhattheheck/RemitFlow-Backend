@@ -24,14 +24,11 @@ const ApiError = require('../utils/ApiError');
  * @returns {number}
  */
 function calculateFee(amount, fromCode = config.baseCurrency) {
-  const percentFee = Number(amount) * (Number(config.fee.percent) / 100);
-  const fee = percentFee + config.fee.flat;
-  // Round both components together, compensating for binary drift at a
-  // half-minor-unit boundary (for example, 480 JPY yields 7.499999999999999).
-  return currencyPolicy.roundToCurrency(
-    fee + Math.abs(fee) * Number.EPSILON,
-    fromCode
-  );
+  return currencyPolicy.roundToCurrency(amount, fromCode, {
+    multiplier: config.fee.percent,
+    divisor: 100,
+    addend: config.fee.flat,
+  });
 }
 
 /**
@@ -64,14 +61,16 @@ function getQuote(amount, from, to) {
 
   const fee = calculateFee(numericAmount, fromCode);
   const amountAfterFee = currencyPolicy.roundToCurrency(
-    numericAmount - fee,
-    fromCode
+    numericAmount,
+    fromCode,
+    { addend: -fee }
   );
   const rate = rateService.getRate(fromCode, toCode);
   // Receive side rounds to the *destination* currency's minor units so a
   // JPY payout never carries fractional yen that settlement cannot pay.
-  const receiveAmount = currencyPolicy.roundToCurrency(
-    amountAfterFee * rate,
+  const receiveAmount = rateService.convert(
+    amountAfterFee,
+    fromCode,
     toCode
   );
   if (receiveAmount <= 0) {

@@ -107,16 +107,64 @@ function maxSafeMagnitude(minorUnits) {
   return Number.MAX_SAFE_INTEGER / 10 ** minorUnits;
 }
 
+/** Convert a finite decimal input to an exact numerator/denominator pair. */
+function decimalRatio(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new RangeError('amount is outside the supported numeric range');
+  }
+  if (numeric === 0) return [0n, 1n];
+  const text = typeof value === 'string' ? value.trim() : String(numeric);
+  const match = /^([+-]?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(text);
+  if (!match) {
+    throw new TypeError('amount must be a decimal number');
+  }
+  const fraction = match[3] || '';
+  const scale = fraction.length - Number(match[4] || 0);
+  const numerator = BigInt(`${match[1]}${match[2]}${fraction}`);
+  return scale >= 0
+    ? [numerator, 10n ** BigInt(scale)]
+    : [numerator * 10n ** BigInt(-scale), 1n];
+}
+
 /**
- * Round `amount` to the currency's minor-unit precision.
- * @param {number} amount
+ * Round a decimal amount to minor units, with ties toward positive infinity
+ * (HALF_UP for nonnegative funds, preserving Math.round's negative ties).
+ * Fee and FX callers pass their original decimal factors so multiplication,
+ * division and addition happen before the single rounding operation.
+ * @param {number|string} amount
  * @param {string} code
+ * @param {{ multiplier?: number, divisor?: number, addend?: number }} [options]
  * @returns {number}
  */
-function roundToCurrency(amount, code) {
+function roundToCurrency(amount, code, options = {}) {
   const { minorUnits } = getMeta(code);
   const factor = 10 ** minorUnits;
-  return Math.round((Number(amount) + Number.EPSILON) * factor) / factor;
+  const [amountN, amountD] = decimalRatio(amount);
+  const [multiplyN, multiplyD] = decimalRatio(options.multiplier ?? 1);
+  const [divideN, divideD] = decimalRatio(options.divisor ?? 1);
+  const [addN, addD] = decimalRatio(options.addend ?? 0);
+  if (divideN === 0n) {
+    throw new RangeError('currency conversion divisor must not be zero');
+  }
+  let denominator = amountD * multiplyD * divideN * addD;
+  let numerator = (amountN * multiplyN * divideD * addD
+    + addN * amountD * multiplyD * divideN) * BigInt(factor);
+  if (denominator < 0n) {
+    numerator = -numerator;
+    denominator = -denominator;
+  }
+  const negative = numerator < 0n;
+  const magnitude = negative ? -numerator : numerator;
+  let rounded = magnitude / denominator;
+  const twiceRemainder = (magnitude % denominator) * 2n;
+  if (negative ? twiceRemainder > denominator : twiceRemainder >= denominator) {
+    rounded += 1n;
+  }
+  if (rounded > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError('amount is outside the supported numeric range');
+  }
+  return (negative ? -Number(rounded) : Number(rounded)) / factor;
 }
 
 /** Amount input is numeric or textual; objects and arrays are never coerced. */
@@ -177,7 +225,7 @@ function canonicalizeAmount(amount, code, options = {}) {
     return { ok: false, errors };
   }
 
-  const canonical = roundToCurrency(n, meta.code);
+  const canonical = roundToCurrency(amount, meta.code);
 
   if (canonical < meta.minAmount) {
     errors.push(`amount must be at least ${meta.minAmount} ${meta.code}`);

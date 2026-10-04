@@ -99,12 +99,14 @@ function clamp(amount, min, max) {
  * @returns {number}
  */
 function percentage(amount, percent, currencyCode) {
-  const raw = Number(amount) * (Number(percent) / 100);
   if (currencyCode) {
     const currencyPolicy = require('./currencyPolicy');
-    return currencyPolicy.roundToCurrency(raw, currencyCode);
+    return currencyPolicy.roundToCurrency(amount, currencyCode, {
+      multiplier: percent,
+      divisor: 100,
+    });
   }
-  return round(raw);
+  return round(Number(amount) * (Number(percent) / 100));
 }
 
 /**
