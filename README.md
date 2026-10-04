@@ -32,7 +32,7 @@ The application is configured using environment variables (typically defined in 
 | `DEFAULT_BASE_CURRENCY` | Default base currency for rates | `USD` |
 | `TRANSFER_FEE_PERCENT` | Percentage fee charged per transfer | `1.5` |
 | `TRANSFER_FEE_FLAT` | Flat fee charged per transfer | `0.30` |
-| `MAX_TRANSFER_AMOUNT` | Maximum single transfer amount accepted | `50000` |
+| `MAX_TRANSFER_AMOUNT` | Maximum send amount in source-currency units, shared by quotes and transfers | `50000` |
 | `STELLAR_NETWORK` | Stellar network environment (`testnet`, `public`) | `testnet` |
 | `CORS_ORIGIN` | Allowed CORS origin | `*` |
 | `RATE_LIMIT_WINDOW_MS` | Time window for rate limiting (ms) | `60000` |
@@ -238,11 +238,43 @@ The API implements Cache-Control response headers for security and efficiency:
 - `GET /api/rates/:pair` — rate for one pair, e.g. `/api/rates/USD-INR`.
 - `GET /api/quote?amount=&from=&to=` — FX quote with fee breakdown.
 
-All `amount` fields (quotes and transfers) are guarded for numeric
-precision: values must be finite, within a safe numeric range, and have
-at most 2 decimal places (e.g. `100.129` is rejected with a 400). This
-prevents floating-point/sub-cent precision loss from being silently
-rounded away.
+Quote and transfer requests use the same
+[currency policy](src/utils/currencyPolicy.js). Supply `amount` as a number
+or an ordinary decimal string, and `from` / `to` as supported currency-code
+strings. Codes are trimmed and normalized to uppercase; source and destination
+must differ. Arrays and objects are rejected rather than coerced to amounts
+or currency codes.
+
+Send amounts must be positive, finite, within the safe numeric range after
+scaling to minor units, and satisfy the source currency's precision:
+
+| Source currency | Maximum decimal places | Minimum send amount |
+| --- | --- | --- |
+| `JPY` | `0` (whole units) | `1` |
+| `USD`, `EUR`, `GBP`, `INR`, `NGN`, `PHP`, `MXN`, `KES` | `2` | `0.01` |
+
+For example, `amount=10.5&from=JPY&to=USD` is rejected with `400`, as is
+`100.129` sent in USD. String amounts must use plain decimal notation;
+fractional digits count even when they are zero, so `"100.0"` is not a valid
+JPY string amount. Invalid send precision is rejected, not silently rounded.
+
+Both `GET /api/quote` and `POST /api/transfers` enforce
+`MAX_TRANSFER_AMOUNT` (default `50000`) in the **source currency's units**.
+This is not a USD-equivalent ceiling or a separate maximum on the converted
+recipient amount. Configure it before starting the process; the shared
+configuration is loaded at startup.
+
+The [quote service](src/services/quoteService.js) adds the percentage and flat
+fee components, then rounds the combined fee once to source minor units.
+The amount remaining after fees is converted and rounded to destination
+minor units, including whole JPY payouts. The final receive amount must be
+positive: meeting the table's minimum alone does not guarantee a payable
+quote. A zero or negative payout after fees and destination rounding is
+rejected with `400` by preview and transfer creation, before settlement or
+transfer insertion.
+
+The demo retains JavaScript-number arithmetic and mock FX/Stellar services;
+numeric strings do not add arbitrary-precision decimal accounting.
 
 ### Transfers
 
