@@ -344,3 +344,100 @@ test('claimTransfer without lifecycle context still works for internal callers',
   assert.equal(claimed.version, 2);
   assert.equal(transfer.status, 'claimed');
 });
+
+
+// Archive changes share the resource version with terminal settlement.
+for (const action of ['archive', 'unarchive']) {
+  test(`archive metadata cannot race settlement: ${action}`, () => {
+    const transfer = transferService.createTransfer(PAYLOAD);
+    if (action === 'unarchive') transferService.archiveTransfer(transfer.id);
+    const version = transfer.version;
+    const archivedAt = transfer.archivedAt;
+    const context = lifecycle(`archive-race-${action}`, version);
+    let nestedError;
+    let outerError;
+    let first;
+
+    settlementWorker.settleClaim = (operationId) => {
+      settleCalls += 1;
+      const receipt = realSettleClaim(operationId);
+      if (settleCalls === 1) {
+        try {
+          transferService[`${action}Transfer`](transfer.id);
+        } catch (error) {
+          nestedError = error;
+        }
+      }
+      return receipt;
+    };
+    try {
+      first = transferService.claimTransfer(transfer.id, 'outer', context);
+    } catch (error) {
+      outerError = error;
+    }
+    const afterFirst = {
+      status: transfer.status,
+      version: transfer.version,
+      receiptCount: store.settlementReceipts.size,
+      nestedStatus: nestedError?.statusCode || null,
+      outerStatus: outerError?.statusCode || null,
+    };
+    // On the old code, the first receipt exists while local state is pending.
+    // A new-key retry demonstrates the second settlement, not merely a 409.
+    if (outerError && !nestedError) {
+      transferService.claimTransfer(
+        transfer.id, 'retry', lifecycle(`second-${action}`, transfer.version)
+      );
+    }
+    console.log('ARCHIVE_SETTLEMENT_OBSERVATION', JSON.stringify({
+      action, afterFirst, finalReceiptCount: store.settlementReceipts.size,
+      settleCalls,
+    }));
+
+    assert.ok(nestedError instanceof ApiError, 'metadata mutation must lose the held lease');
+    assert.equal(nestedError.statusCode, 409);
+    assert.equal(nestedError.details.requestedAction, action);
+    assert.equal(outerError, undefined);
+    assert.equal(first.status, 'claimed');
+    assert.equal(first.version, version + 1);
+    assert.equal(first.archivedAt, archivedAt);
+    assert.equal(store.settlementReceipts.size, 1);
+    assert.equal(settleCalls, 1);
+    assert.deepEqual(transferService.claimTransfer(transfer.id, 'replay', context), first);
+    assert.equal(settleCalls, 1);
+    assert.equal(store.lifecycleLeases.size, 0);
+  });
+}
+
+test('already archived metadata remains an idempotent no-op during settlement', () => {
+  const transfer = transferService.createTransfer(PAYLOAD);
+  transferService.archiveTransfer(transfer.id);
+  const archivedAt = transfer.archivedAt;
+  const version = transfer.version;
+  settlementWorker.settleClaim = (operationId) => {
+    settleCalls += 1;
+    assert.equal(transferService.archiveTransfer(transfer.id), transfer);
+    assert.equal(transfer.version, version);
+    return realSettleClaim(operationId);
+  };
+  const result = transferService.claimTransfer(transfer.id, 'claim', lifecycle('noop', version));
+  assert.equal(result.archivedAt, archivedAt);
+  assert.equal(result.status, 'claimed');
+  assert.equal(settleCalls, 1);
+});
+
+test('provider failure releases the lease for later archive and unarchive', () => {
+  const transfer = transferService.createTransfer(PAYLOAD);
+  settlementWorker.settleClaim = () => { throw new Error('provider failed'); };
+  assert.throws(
+    () => transferService.claimTransfer(transfer.id, 'claim', lifecycle('failure-archive', 1)),
+    /provider failed/
+  );
+  assert.equal(store.lifecycleLeases.size, 0);
+  assert.equal(store.lifecycleIdempotency.size, 0);
+  assert.equal(transferService.archiveTransfer(transfer.id).version, 2);
+  assert.equal(transferService.unarchiveTransfer(transfer.id).version, 3);
+  assert.equal(transfer.status, 'pending');
+  assert.equal(transfer.archivedAt, null);
+  assert.equal(store.settlementReceipts.size, 0);
+});

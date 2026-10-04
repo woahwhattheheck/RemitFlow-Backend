@@ -391,13 +391,13 @@ function compareAndSetTransition(transfer, { expectedVersion, nextStatus, mutate
 }
 
 /**
- * Acquire an exclusive lease for one transfer while a lifecycle mutation runs.
- * Two different operation keys cannot both prepare provider work for the same
- * transfer — that is the original double-settlement window.
+ * Refuse a competing mutation while settlement holds the resource lease.
+ * Archive metadata advances the same version as claim/cancel, so it must not
+ * invalidate a prepared settlement before the terminal state commits.
  * @param {string} transferId
- * @param {{ action: string, actor: string, key: string, token: string }} lease
+ * @param {string} action
  */
-function acquireLifecycleLease(transferId, lease) {
+function assertLifecycleUnlocked(transferId, action) {
   const existing = store.lifecycleLeases.get(transferId);
   if (existing) {
     throw ApiError.conflict(
@@ -405,10 +405,14 @@ function acquireLifecycleLease(transferId, lease) {
       {
         transferId,
         heldAction: existing.action,
-        requestedAction: lease.action,
+        requestedAction: action,
       }
     );
   }
+}
+
+function acquireLifecycleLease(transferId, lease) {
+  assertLifecycleUnlocked(transferId, lease.action);
   store.lifecycleLeases.set(transferId, lease);
 }
 
@@ -621,6 +625,7 @@ function cancelTransfer(id, requestId, lifecycle) {
 function archiveTransfer(id) {
   const transfer = getTransferOrThrow(id);
   if (!transfer.archivedAt) {
+    assertLifecycleUnlocked(id, 'archive');
     const timestamp = nextTimestamp(transfer.updatedAt);
     transfer.archivedAt = timestamp;
     transfer.updatedAt = timestamp;
@@ -639,6 +644,7 @@ function unarchiveTransfer(id) {
   if (!transfer.archivedAt) {
     throw ApiError.conflict(`Transfer is not archived: ${id}`);
   }
+  assertLifecycleUnlocked(id, 'unarchive');
   transfer.archivedAt = null;
   transfer.updatedAt = nextTimestamp(transfer.updatedAt);
   transfer.version = currentVersion(transfer) + 1;
