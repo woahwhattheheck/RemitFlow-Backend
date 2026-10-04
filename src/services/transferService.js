@@ -313,18 +313,23 @@ function createTransferUnchecked(data, requestId, idempotency) {
 }
 
 /**
- * Move a transfer to a new status if the transition is allowed.
+ * Validate a transition without changing the stored transfer.
  * @param {object} transfer
  * @param {string} nextStatus
- * @returns {object}
+ * @returns {void}
  */
-function transition(transfer, nextStatus) {
+function assertTransition(transfer, nextStatus) {
   const allowed = TRANSFER_TRANSITIONS[transfer.status] || [];
   if (!allowed.includes(nextStatus)) {
     throw ApiError.conflict(
       `Cannot change transfer from ${transfer.status} to ${nextStatus}`
     );
   }
+}
+
+/** Move a transfer to an allowed status. */
+function transition(transfer, nextStatus) {
+  assertTransition(transfer, nextStatus);
   transfer.status = nextStatus;
   transfer.updatedAt = nextTimestamp(transfer.updatedAt);
   return transfer;
@@ -341,8 +346,10 @@ function claimTransfer(id, requestId, auth) {
   // Pass null auth into getTransferOrThrow: write scope already asserted, and
   // re-asserting transfers:read would reject write-only tokens if introduced.
   const transfer = getTransferOrThrow(id, null);
+  assertTransition(transfer, TRANSFER_STATUS.CLAIMED);
+  const claimableBalanceId = stellarService.createClaimableBalanceId();
   transition(transfer, TRANSFER_STATUS.CLAIMED);
-  transfer.claimableBalanceId = stellarService.createClaimableBalanceId();
+  transfer.claimableBalanceId = claimableBalanceId;
 
   auditService.addEntry({
     action: 'transfer.claimed',
