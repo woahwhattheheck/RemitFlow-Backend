@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const { store, reset } = require('../src/store');
 const config = require('../src/config');
+const { RATES_TO_USD } = require('../src/config/rates');
 const fxCacheService = require('../src/services/fxCacheService');
 const fxProviders = require('../src/services/fxProviders');
 const quoteService = require('../src/services/quoteService');
@@ -131,7 +132,7 @@ test('fallback order is primary-then-fallback (deterministic)', () => {
         seen.push('fallback');
         return {
           providerId: 'fallback',
-          ratesToUsd: { USD: 1, EUR: 1.08 },
+          ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08 },
           fetchedAt: now,
         };
       },
@@ -150,7 +151,7 @@ test('new provider snapshots obey the requested TTL and grace boundaries before 
       fxCacheService.reset();
       fxProviders.setProviders([{
         id: 'primary',
-        fetch: () => ({ ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs }),
+        fetch: () => ({ ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs }),
       }]);
       const usable = ageMs < 1_000 || (policy === 'allow_stale' && ageMs < 6_000);
       if (!usable) {
@@ -184,14 +185,14 @@ test('invalid provider timestamps cannot win over a usable fallback', () => {
         id: 'primary',
         fetch: () => {
           attempted.push('primary');
-          return { ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt };
+          return { ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08 }, fetchedAt };
         },
       },
       {
         id: 'fallback',
         fetch: () => {
           attempted.push('fallback');
-          return { ratesToUsd: { USD: 1, EUR: 1.1 }, fetchedAt: now };
+          return { ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.1 }, fetchedAt: now };
         },
       },
     ]);
@@ -208,16 +209,16 @@ test('malformed provider rates fall back before either policy can cache them', (
   const invalidMaps = [
     null,
     {},
-    Object.assign([], { USD: 1, EUR: 1.08 }),
+    Object.assign([], { ...RATES_TO_USD, USD: 1, EUR: 1.08 }),
     ...[0, -0, -1, NaN, Infinity, -Infinity, '1.08', null, undefined, true]
-      .map((EUR) => ({ USD: 1, EUR })),
-    { USD: 1, EUR: 1.08, GBP: 0 },
+      .map((EUR) => ({ ...RATES_TO_USD, USD: 1, EUR })),
+    { ...RATES_TO_USD, USD: 1, EUR: 1.08, GBP: 0 },
   ];
   for (const policy of ['reject_stale', 'allow_stale']) {
     for (const ratesToUsd of invalidMaps) {
       fxCacheService.reset();
       const attempted = [];
-      const healthyRates = { USD: 1, EUR: 1.1 };
+      const healthyRates = { ...RATES_TO_USD, USD: 1, EUR: 1.1 };
       fxProviders.setProviders([
         { id: 'primary', fetch: () => {
           attempted.push('primary');
@@ -259,7 +260,7 @@ test('fallback order skips responses outside policy and stops at the first usabl
       id,
       fetch: () => {
         attempted.push(id);
-        return { ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs };
+        return { ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs };
       },
     })));
     const snapshot = fxCacheService.getSnapshot({ now, policy });
@@ -277,7 +278,7 @@ test('unusable provider responses preserve a cached display snapshot only within
   fxCacheService.seed({ fetchedAt, providerId: 'cached' });
   fxProviders.setProviders([{
     id: 'expired',
-    fetch: () => ({ ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - 6_000 }),
+    fetch: () => ({ ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08 }, fetchedAt: now - 6_000 }),
   }]);
   assert.throws(
     () => fxCacheService.getSnapshot({ now, policy: 'reject_stale' }),
@@ -298,11 +299,11 @@ test('unusable provider responses preserve a cached display snapshot only within
 test('malformed provider rates preserve a cached display snapshot only within grace', () => {
   const now = 6_450_000;
   const fetchedAt = now - 1_500;
-  const ratesToUsd = { USD: 1, EUR: 1.08 };
+  const ratesToUsd = { ...RATES_TO_USD, USD: 1, EUR: 1.08 };
   fxCacheService.seed({ fetchedAt, providerId: 'cached', ratesToUsd });
   fxProviders.setProviders([
-    { id: 'primary', fetch: () => ({ ratesToUsd: { USD: 1, EUR: 0 }, fetchedAt: now }) },
-    { id: 'fallback', fetch: () => ({ ratesToUsd: { USD: 1, EUR: -1.1 }, fetchedAt: now }) },
+    { id: 'primary', fetch: () => ({ ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 0 }, fetchedAt: now }) },
+    { id: 'fallback', fetch: () => ({ ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: -1.1 }, fetchedAt: now }) },
   ]);
   assert.throws(
     () => fxCacheService.getSnapshot({ now, policy: 'reject_stale' }),
@@ -349,11 +350,11 @@ test('HTTP invalid FX responses create no records and allow the same transfer ke
     fxProviders.setProviders([
       { id: 'primary', fetch: ({ now }) => {
         attempted.push('primary');
-        return { ratesToUsd: { USD: 1, EUR: 0 }, fetchedAt: now };
+        return { ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 0 }, fetchedAt: now };
       } },
       { id: 'fallback', fetch: ({ now }) => {
         attempted.push('fallback');
-        return { ratesToUsd: { USD: 1, EUR: -1.1 }, fetchedAt: now };
+        return { ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: -1.1 }, fetchedAt: now };
       } },
     ]);
     for (const request of [() => fetch(`${base}/api/quote?amount=100&from=USD&to=EUR`), post]) {
@@ -409,7 +410,7 @@ test('HTTP transfer rejects newly fetched stale rates without reserving a quote 
       reset();
       fxProviders.setProviders([{
         id: 'primary',
-        fetch: ({ now }) => ({ ratesToUsd: { USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs }),
+        fetch: ({ now }) => ({ ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08 }, fetchedAt: now - ageMs }),
       }]);
       const rejected = await post();
       const failure = await rejected.json();
@@ -458,7 +459,7 @@ test('stampede: re-entrant refresh does not start a second provider fetch', () =
         innerCalls += 1;
         return {
           providerId: 'primary',
-          ratesToUsd: { USD: 1, EUR: 1.08, GBP: 1.27, INR: 0.012 },
+          ratesToUsd: { ...RATES_TO_USD, USD: 1, EUR: 1.08, GBP: 1.27, INR: 0.012 },
           fetchedAt: now,
         };
       },
