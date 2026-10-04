@@ -4,6 +4,8 @@ const config = require('../config');
 const { store } = require('../store');
 const rateService = require('./rateService');
 const stellarService = require('./stellarService');
+const { createProbePool } = require('./inFlightProbe');
+const probePool = createProbePool();
 
 /**
  * Dependency-aware readiness diagnostics.
@@ -11,8 +13,8 @@ const stellarService = require('./stellarService');
  * Separates process liveness from traffic readiness by probing the store
  * (database stand-in), payment provider (Stellar), and FX rate table with
  * a per-check time budget. Failures surface as stable, redacted reason
- * codes — never raw messages, stacks, or connection material — and every
- * probe is re-evaluated on the next request so recovery does not require
+ * codes — never raw messages, stacks, or connection material — and completed
+ * probes are re-evaluated on the next request so recovery does not require
  * a process restart.
  */
 
@@ -57,8 +59,8 @@ const defaultProbes = Object.freeze({
     return { ok: true };
   },
 
-  async payments() {
-    const result = await stellarService.ping();
+  async payments(ping = stellarService.ping) {
+    const result = await ping.call(stellarService);
     if (!result || result.ok !== true) {
       const err = new Error('payments unavailable');
       err.reasonCode = REASON.PAYMENTS_UNAVAILABLE;
@@ -67,8 +69,8 @@ const defaultProbes = Object.freeze({
     return { ok: true };
   },
 
-  async fx() {
-    const result = await rateService.ping();
+  async fx(ping = rateService.ping) {
+    const result = await ping.call(rateService);
     if (!result || result.ok !== true) {
       const err = new Error('fx unavailable');
       err.reasonCode = REASON.FX_UNAVAILABLE;
@@ -218,7 +220,18 @@ async function runCheck(name, timeoutMs = checkTimeoutMs()) {
       err.reasonCode = REASON.CHECK_ERROR;
       throw err;
     }
-    await withTimeout(forced || probe(), timeoutMs, timeoutReason);
+    // Replacing an adapter must not keep joining its predecessor's hung call.
+    // Capture that method now, including its receiver, before deferred execution.
+    const adapter = probe === defaultProbes.payments ? stellarService.ping
+      : probe === defaultProbes.fx ? rateService.ping : probe;
+    const invoke = probe === defaultProbes.payments || probe === defaultProbes.fx
+      ? () => probe(adapter) : probe;
+    const subscription = forced ? null : probePool.acquire(name, invoke, adapter);
+    try {
+      await withTimeout(forced || subscription.promise, timeoutMs, timeoutReason);
+    } finally {
+      if (subscription) subscription.release();
+    }
     return {
       name,
       status: 'ok',
@@ -235,8 +248,8 @@ async function runCheck(name, timeoutMs = checkTimeoutMs()) {
 }
 
 /**
- * Evaluate every dependency. Safe to call on every readiness request —
- * nothing is cached as permanently failed.
+ * Evaluate every dependency. Overlapping requests share only unfinished
+ * probes; each caller keeps its own deadline and completed checks are not cached.
  * @param {object} [options]
  * @param {number} [options.timeoutMs]
  * @returns {Promise<{
@@ -300,6 +313,7 @@ function setProbeForTests(name, fn) {
 
 /** Restore default probes and clear forced states (tests only). */
 function resetForTests() {
+  probePool.clear();
   for (const name of DEPENDENCIES) {
     probes[name] = defaultProbes[name];
   }
