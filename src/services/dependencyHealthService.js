@@ -141,7 +141,15 @@ function withTimeout(promise, ms, timeoutReason) {
  */
 function redactReason(name, err) {
   const code = err && typeof err === 'object' ? err.reasonCode : undefined;
-  if (typeof code === 'string' && Object.values(REASON).includes(code)) {
+  const codeMatchesDependency =
+    code === REASON.CHECK_ERROR ||
+    (name === 'store' &&
+      (code === REASON.STORE_UNAVAILABLE || code === REASON.STORE_TIMEOUT)) ||
+    (name === 'payments' &&
+      (code === REASON.PAYMENTS_UNAVAILABLE || code === REASON.PAYMENTS_TIMEOUT)) ||
+    (name === 'fx' &&
+      (code === REASON.FX_UNAVAILABLE || code === REASON.FX_TIMEOUT));
+  if (codeMatchesDependency) {
     return code;
   }
 
