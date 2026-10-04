@@ -133,7 +133,8 @@ function queryEntries({
  * @param {string} [resourceId]
  * @returns {string|null}
  */
-function positionKeyAt(seq, resourceId) {
+function positionKeyAt(seq, resourceId, auth) {
+  assertScopes(auth, SCOPES.AUDIT_READ);
   const group = resourceId == null || resourceId === '' ? null : String(resourceId);
   const record = auditIndex.recordAt(seq, group);
   return record ? record.key : null;
