@@ -295,6 +295,17 @@ and passed all 49 cases with no failures or skips, including decimal ties and
 HTTP preview/transfer agreement for GBP/USD, GBP/EUR, and JPY/EUR. This is the
 focused policy test file; it does not represent a complete-suite run.
 
+Set `TRANSFER_FEE_PERCENT=0` or `TRANSFER_FEE_FLAT=0` to disable that
+fee component; set both to zero to waive the fee. Missing or unparseable
+values retain their defaults.
+
+The subsequent [fee-configuration run](https://github.com/woahwhattheheck/RemitFlow-Backend/actions/runs/37192051213)
+checked out [`452a512d`](https://github.com/woahwhattheheck/RemitFlow-Backend/commit/452a512d8ae1d739336dcb8e4bd45e17300e0597).
+With locked dependencies and Node.js 22.23.3, `node --test test/config.test.js test/currencyPolicy.test.js`
+passed all 60 cases without failures or skips, including fee waivers and
+the existing HTTP preview/transfer checks. This is the focused selection,
+not a complete-suite result.
+
 ### Transfers
 
 - `POST /api/transfers` — create a transfer.
