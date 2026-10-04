@@ -53,20 +53,21 @@ function listRates(opts = {}) {
 }
 
 /**
- * Check whether a currency code is supported against the current snapshot.
- * Falls back to the configured currency list when providers are unreachable
- * so validation can still reject unknown codes without requiring a live pull.
+ * Check configured currencies before inspecting any provider-added codes.
+ * Known currencies need no decorated snapshot or rate-table copy. Validation
+ * remains available during provider outages and never initiates a live pull.
  * @param {string} code
  * @returns {boolean}
  */
 function isSupported(code) {
   const normalized = currency.normalize(code);
   if (!normalized) return false;
+  if (SUPPORTED_CURRENCIES.includes(normalized)) return true;
   const peeked = fxCacheService.peek();
   if (peeked && Object.prototype.hasOwnProperty.call(peeked.ratesToUsd, normalized)) {
     return true;
   }
-  return SUPPORTED_CURRENCIES.includes(normalized);
+  return false;
 }
 
 /**
