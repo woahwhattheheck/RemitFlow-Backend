@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: e879b8eea639a7f0b4fbd89641501597ba25e8f3
+          ref: 20024acc2e2be4bd4f5206ab18e5ed01e73c008a
           path: carrier
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -39,10 +39,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE"
           node --version > ../evidence/node-version.txt
           npm ci --no-audit --no-fund > ../evidence/install.log 2>&1
-          # Run37192889105 already reproduced all four failures. Its wrapper
-          # expected TAP but Node24 emitted spec; do not repeat that execution.
-          printf '%s\n' 'Baseline run37192889105: 4 tests,0 pass,4 fail; artifact11298699138; sha256:c75c5b1d513c6fc429cf72fab4cfae4d5d9b973827b67f98c60b0dc7dfc90e20' > ../evidence/baseline-reference.txt
+          printf '%s\n' 'Baseline37192889105: four new failures; first candidate37193040714:27pass2fail; adapter generation repair keeps all existing assertions.' > ../evidence/prior-results.txt
           python ../carrier/work/rf140-delta/prepare.py
+          python ../carrier/work/rf140-delta/adapter_identity.py
           node --unhandled-rejections=strict --test --test-reporter=tap test/dependencyHealth.test.js test/readinessProbeSharing.test.js 2>&1 | tee ../evidence/after.tap
           git diff --exit-code -- test/dependencyHealth.test.js package.json package-lock.json
           git diff > ../evidence/source.patch
