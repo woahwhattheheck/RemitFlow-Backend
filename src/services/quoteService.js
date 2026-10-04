@@ -318,8 +318,14 @@ function resolveForTransfer(data, opts = {}) {
     return quote;
   }
 
-  return getQuote(data.amount, data.from, data.to, {
+  const quote = getQuote(data.amount, data.from, data.to, {
     now,
+    policy: 'reject_stale',
+  });
+  // A synchronous provider may consume the remaining FX or quote TTL.
+  // Check at completion before settlement, retaining an explicit test clock.
+  return assertUsable(quote, {
+    now: opts.now != null ? now : Date.now(),
     policy: 'reject_stale',
   });
 }

@@ -692,6 +692,86 @@ test('transfer without quoteId still mints and binds a fresh quote (compat)', ()
   assert.equal(stored.sendAmount, transfer.sendAmount);
 });
 
+function delayedFxProvider(t, delayMs) {
+  const clock = { now: 40_000_000, delayMs };
+  t.mock.method(Date, 'now', () => clock.now);
+  fxProviders.setProviders([{
+    id: 'primary',
+    fetch: ({ now }) => {
+      clock.now += clock.delayMs;
+      return { providerId: 'primary', ratesToUsd: { ...RATES_TO_USD }, fetchedAt: now };
+    },
+  }]);
+  return clock;
+}
+
+test('transfer mint completion rejects FX expiry before settlement', (t) => {
+  delayedFxProvider(t, config.fx.cacheTtlMs);
+  const settlement = t.mock.method(require('../src/services/stellarService'), 'submitPayment');
+  assert.throws(
+    () => transferService.createTransfer(PAYLOAD, 'req-delayed-fx'),
+    (err) => err instanceof ApiError && err.details.code === 'QUOTE_STALE' &&
+      err.details.freshness.status === 'stale' &&
+      err.details.freshness.ageMs === config.fx.cacheTtlMs
+  );
+  assert.equal(settlement.mock.callCount(), 0);
+  assert.equal(store.transfers.size, 0);
+});
+
+test('transfer mint completion rejects quote expiry before settlement', (t) => {
+  config.fx.cacheTtlMs = 3_000;
+  config.fx.quoteTtlMs = 1_000;
+  delayedFxProvider(t, config.fx.quoteTtlMs);
+  const settlement = t.mock.method(require('../src/services/stellarService'), 'submitPayment');
+  assert.throws(
+    () => transferService.createTransfer(PAYLOAD, 'req-delayed-quote'),
+    (err) => err instanceof ApiError && err.details.code === 'QUOTE_EXPIRED'
+  );
+  assert.equal(settlement.mock.callCount(), 0);
+  assert.equal(store.transfers.size, 0);
+});
+
+test('transfer mint completion refreshes age while preserving terms and explicit clocks', (t) => {
+  delayedFxProvider(t, 100);
+  const bound = quoteService.resolveForTransfer(PAYLOAD);
+  const issued = quoteService.getQuoteById(bound.quoteId);
+  assert.equal(bound.stale, false);
+  assert.equal(bound.freshness.status, 'fresh');
+  assert.equal(bound.freshness.ageMs, 100);
+  assert.equal(issued.freshness.ageMs, 0);
+  for (const field of ['quoteId', 'quoteVersion', 'rate', 'receiveAmount', 'quoteExpiresAt']) {
+    assert.equal(bound[field], issued[field]);
+  }
+  assert.equal(fxCacheService.getProviderFetchCount(), 1);
+
+  reset();
+  // The optional clock remains deterministic even when wall time is later.
+  const fixed = quoteService.resolveForTransfer(PAYLOAD, { now: 12_000_000 });
+  assert.equal(fixed.quoteCreatedAt, new Date(12_000_000).toISOString());
+  assert.equal(fixed.freshness.ageMs, 0);
+  assert.equal(fixed.stale, false);
+});
+
+test('transfer mint completion retains only the configured stale grace opt-in', (t) => {
+  config.fx.allowStaleForTransfers = true;
+  config.fx.quoteTtlMs = 10_000;
+  const clock = delayedFxProvider(t, config.fx.cacheTtlMs);
+  const transfer = transferService.createTransfer(PAYLOAD, 'req-delayed-allowed');
+  assert.equal(transfer.rateStale, true);
+  assert.equal(transfer.rate, 0.93);
+  assert.equal(transfer.receiveAmount, 90.93);
+
+  clock.delayMs = config.fx.cacheTtlMs + config.fx.staleGraceMs;
+  const settlement = t.mock.method(require('../src/services/stellarService'), 'submitPayment');
+  assert.throws(
+    () => transferService.createTransfer(PAYLOAD, 'req-delayed-expired'),
+    (err) => err instanceof ApiError && err.details.code === 'QUOTE_STALE' &&
+      err.details.freshness.status === 'expired'
+  );
+  assert.equal(settlement.mock.callCount(), 0);
+  assert.equal(store.transfers.size, 1);
+});
+
 test('provider outage blocks transfer pricing rather than using silent stale rates', () => {
   // Regression for the original failure mode: outage must not price transfers
   // on an expired rate that looks "current" because freshness was invisible.
