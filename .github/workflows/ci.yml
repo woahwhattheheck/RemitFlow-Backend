@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 8
     env:
       YVB_BASELINE: 6cfc7e78a1021fcb73157ca46fe527231b688322
-      YVB_CANDIDATE: 7c7100b08a2881e3ef0d547d1595139cb7a4dfde
+      YVB_CANDIDATE: 7ad92b59435f06f99a81772b0b0728e6d524df24
       NODE_ENV: test
       ANALYTICS_CURSOR_SECRET: synthetic-yvb84-benchmark-only
       NODE_PATH: ${{ github.workspace }}/node_modules
@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: woahwhattheheck/YieldVault-Backend-1
-          ref: 7c7100b08a2881e3ef0d547d1595139cb7a4dfde
+          ref: 7ad92b59435f06f99a81772b0b0728e6d524df24
       - uses: actions/setup-node@v4
         with:
           node-version: 22
