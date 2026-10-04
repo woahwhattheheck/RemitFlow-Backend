@@ -39,29 +39,56 @@ function rateLimit(options = {}) {
 
   /** @type {Map<string, { count: number, resetAt: number, touchedAt: number }>} */
   const hits = new Map();
-  let nextResetAt = Infinity;
+  // One heap node per tracked identity. A rolled-back clock can give a newly
+  // admitted key an earlier deadline, so insertion order is not expiry order.
+  const expiries = [];
+
+  function scheduleExpiry(key, entry) {
+    const node = { key, entry };
+    let index = expiries.length;
+    expiries.push(node);
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (expiries[parent].entry.resetAt <= entry.resetAt) break;
+      expiries[index] = expiries[parent];
+      index = parent;
+    }
+    expiries[index] = node;
+  }
 
   function pruneExpired(now) {
-    // A full table should reject new identities without rescanning live budgets.
-    if (now < nextResetAt) return;
-    nextResetAt = Infinity;
-    for (const [key, entry] of hits) {
-      if (now >= entry.resetAt) {
-        hits.delete(key);
-      } else {
-        nextResetAt = Math.min(nextResetAt, entry.resetAt);
+    // Remove expired entries without scanning the surviving budgets. Repeated
+    // hits never enqueue again; pruning before renewal keeps both tables bounded.
+    while (expiries.length && now >= expiries[0].entry.resetAt) {
+      const expired = expiries[0];
+      const tail = expiries.pop();
+      if (expiries.length) {
+        let index = 0;
+        while (index * 2 + 1 < expiries.length) {
+          let child = index * 2 + 1;
+          if (child + 1 < expiries.length &&
+              expiries[child + 1].entry.resetAt < expiries[child].entry.resetAt) {
+            child += 1;
+          }
+          if (tail.entry.resetAt <= expiries[child].entry.resetAt) break;
+          expiries[index] = expiries[child];
+          index = child;
+        }
+        expiries[index] = tail;
       }
+      if (hits.get(expired.key) === expired.entry) hits.delete(expired.key);
     }
   }
 
   function hasCapacity(now) {
-    // Also prune before renewing an expired identity below capacity, so the
-    // cached deadline remains exact if the wall clock later moves backward.
+    // Also prune before renewal below capacity, removing the old generation
+    // from the expiry index before the same identity receives a new budget.
     pruneExpired(now);
     return hits.size < maxKeys;
   }
 
   function capacityRetryAfter(now) {
+    const nextResetAt = expiries.length ? expiries[0].entry.resetAt : Infinity;
     return Math.max(1, Math.ceil((nextResetAt - now) / 1000));
   }
 
@@ -97,7 +124,7 @@ function rateLimit(options = {}) {
       entry = { count: 0, resetAt: now + windowMs, touchedAt: now };
       hits.delete(key);
       hits.set(key, entry);
-      nextResetAt = Math.min(nextResetAt, entry.resetAt);
+      scheduleExpiry(key, entry);
     }
 
     entry.count += 1;
@@ -127,7 +154,7 @@ function rateLimit(options = {}) {
 
   rateLimitMiddleware.reset = function reset() {
     hits.clear();
-    nextResetAt = Infinity;
+    expiries.length = 0;
   };
 
   rateLimitMiddleware.size = function size() {

@@ -293,6 +293,51 @@ test('an unchanged full table has bounded traversal work during a rejection burs
   assert.ok(visited <= maxKeys, `${visited} entries visited during unchanged-table rejection`);
 });
 
+test('staggered expiry avoids rescanning live budgets at steady-state capacity', async (t) => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const NativeMap = global.Map;
+  let visited = 0;
+  class CountingMap extends NativeMap {
+    *[Symbol.iterator]() {
+      for (const entry of super[Symbol.iterator]()) {
+        visited += 1;
+        yield entry;
+      }
+    }
+  }
+
+  const maxKeys = 256;
+  let limiter;
+  try {
+    global.Map = CountingMap;
+    limiter = rateLimit({
+      windowMs: maxKeys * 1000, max: 1, maxKeys, forceInTest: true,
+      keyGenerator: (req) => req.actor,
+    });
+  } finally {
+    global.Map = NativeMap;
+  }
+  const request = (actor) => run(limiter, { actor }, mockRes());
+  for (let i = 0; i < maxKeys; i += 1) {
+    now = i * 1000;
+    assert.equal((await request(`known-${i}`)).err, null);
+  }
+
+  visited = 0;
+  for (let i = 0; i < 128; i += 1) {
+    now = (maxKeys + i) * 1000;
+    assert.equal((await request(`new-${i}`)).err, null);
+    assert.equal(limiter.size(), maxKeys);
+  }
+  const survivor = await request(`known-${maxKeys - 1}`);
+  assert.equal(survivor.err.statusCode, 429);
+  assert.equal(survivor.res.headers['Retry-After'], '128');
+  // Allow work proportional to the released identities, not a complete
+  // live-table traversal for each individual expiry.
+  assert.ok(visited <= maxKeys, `${visited} entries visited for 128 staggered expiries`);
+});
+
 test('capacity retry deadlines round up and release only expired budgets', async (t) => {
   let now = 1_000;
   t.mock.method(Date, 'now', () => now);

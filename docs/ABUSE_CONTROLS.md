@@ -105,5 +105,78 @@ path as the second argument. Alternate original/repaired/original/repaired runs
 using the same script and distinct output filenames; report medians and ranges
 because load on the host can vary. The workload uses generated local traffic and
 does not measure deployed throughput or external provider behavior. Repeated
-rejection avoids table scans until the next expiry; expiry-triggered cleanup
-still takes time proportional to the number of tracked identities.
+rejection does not traverse the table. Expiry cleanup uses the deadline index
+described below.
+
+## Staggered-window expiry
+
+A binary min-heap now orders deadlines independently of insertion order. It has
+one node per tracked identity, and both the map and heap remain bounded by
+`maxKeys`. Repeated hits reuse the same node; renewal first removes the expired
+generation. Reset clears both structures. This ordering also preserves the
+existing behavior when the wall clock moves backward.
+
+Admitting a new identity takes O(log n) heap work. Removing k expired identities
+takes O(k log n), without scanning the n surviving identities. The additional
+index costs O(n) memory; expiring many identities at once can do more work than
+the former linear sweep. This change addresses frequent isolated expiries while
+preserving active budgets, capacity rejection and rounded-up `Retry-After`.
+
+### Measured component result, October 4, 2026
+
+The exact production middleware was loaded with its real `ApiError` and
+`clientIdentity` modules on Node 24.19.0. A controlled clock admitted 10,000
+identities with staggered windows, then 1,000 rolling newcomers while preserving
+10,000 tracked identities. All 11,000 admissions and the final exhausted
+survivor's 429 response matched the original implementation.
+
+| Measurement | Original | Updated |
+|---|---:|---:|
+| Full-map entry visits during the rolling workload | 10,000,000 | 0 |
+| Median rolling time, three alternating pairs | 224.325 ms | 2.818 ms |
+| Rolling time range | 183.074–474.427 ms | 2.466–4.710 ms |
+
+The timing ratio was 79.6× in this component workload. Map iteration counts do
+not count heap operations or ordinary map lookups. Clock, request and response
+objects were controlled; this does not measure HTTP service or fleet throughput.
+A separate deterministic comparison covered 20,000 requests and 629 resets at
+capacities 1, 2, 7, 31 and 256. Complete headers, errors, decisions and tracked
+sizes matched, including backward-clock admissions and renewals.
+
+Original source: commit `f501ce5f4fd6f6f96c82fb9fffed4dc58f3def8e`, limiter
+blob `6748ce8105628e781cccea40c368d2bb3a830b17`. Updated limiter blob:
+`84c97f7b183c1c8e96be0695e5f332f9c2e3acca`.
+[Raw samples and response digests](validation/rate-limit-expiry-20261004.json)
+retain every measured pair. The existing abuse-control suite retains all prior
+cases and adds one regression for staggered expiry.
+
+To reproduce the component comparison from a checkout containing this change:
+
+```sh
+benchmark_dir=$(mktemp -d)
+mkdir "$benchmark_dir/original" "$benchmark_dir/final"
+git archive f501ce5f4fd6f6f96c82fb9fffed4dc58f3def8e | tar -x -C "$benchmark_dir/original"
+git archive HEAD | tar -x -C "$benchmark_dir/final"
+cp scripts/benchmark-rate-limit-expiry.cjs "$benchmark_dir/replay.cjs"
+node "$benchmark_dir/replay.cjs"
+```
+
+The replay writes `results.json` inside the fresh benchmark directory. It uses
+only Node built-ins and the archived production modules; it installs no packages
+and makes no network requests. Host load can change the timing samples.
+
+### Maintained application checks
+
+On the updated limiter/test blobs above, `node --test test/abuseControls.test.js`
+reported 17 passed and 0 failed; `npm test` reported 273 passed and 0 failed,
+with no skipped or cancelled tests. These runs used Node 24.19.0 and the unchanged
+lockfile `be3ad84b812121d2ec4f47541df3a55816bb210c`. The focused suite includes real
+Express loopback requests for proxy identity, correlation, parser failures and
+429 responses. The complete 178-file parent source was checked against its Git
+blob identities before composing the two changed source/test files.
+
+Dependencies came from the matching-lock artifact of the already-completed
+[archive acceptance job](https://github.com/woahwhattheheck/RemitFlow-Backend/actions/runs/37191775463).
+That job's 46 archive passes concern PR #144; the 17/273 results above are separate
+local executions of this PR #138 composition. Sharing dependencies adds no claim
+that the hosted archive job executed the limiter patch.
