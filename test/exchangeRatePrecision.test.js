@@ -47,3 +47,41 @@ test('a quote preserves the FX ratio while fee and receive amounts stay rounded'
   assert.equal(quote.freshness.fetchedAt, new Date(NOW).toISOString());
   assert.equal(fxCacheService.getProviderFetchCount(), 0);
 });
+
+for (const [name, create] of [
+  ['quote creation', (amount) => quoteService.getQuote(amount, 'USD', 'NGN', { now: NOW })],
+  ['transfer binding', (amount) => quoteService.resolveForTransfer(
+    { amount, from: 'USD', to: 'NGN' }, { now: NOW }
+  )],
+]) {
+  test(`${name} rejects an unsafe converted amount before storing a quote`, () => {
+    // The source amount is safe in cents; the configured USD/NGN conversion is not.
+    assert.throws(() => create(100_000_000_000), {
+      name: 'ApiError',
+      statusCode: 400,
+      message: 'receive amount is outside the supported numeric range',
+    });
+    assert.equal(store.quotes.size, 0);
+    // Rejection must not consume an identity or affect ordinary amounts.
+    const valid = create(100);
+    assert.equal(valid.quoteVersion, 1);
+    assert.equal(valid.receiveAmount, 151076.92);
+    assert.equal(store.quotes.size, 1);
+    assert.equal(fxCacheService.getProviderFetchCount(), 0);
+  });
+}
+
+test('a finite FX ratio cannot overflow the stored receive amount', () => {
+  fxCacheService.seed({
+    ratesToUsd: { ...RATES_TO_USD, NGN: 1e-307 },
+    fetchedAt: NOW,
+    providerId: 'precision-fixture',
+  });
+  assert.throws(() => quoteService.getQuote(100, 'USD', 'NGN', { now: NOW }), {
+    name: 'ApiError',
+    statusCode: 400,
+    message: 'receive amount is outside the supported numeric range',
+  });
+  assert.equal(store.quotes.size, 0);
+  assert.equal(fxCacheService.getProviderFetchCount(), 0);
+});

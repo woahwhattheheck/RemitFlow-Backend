@@ -158,7 +158,13 @@ function getQuote(amount, from, to, opts = {}) {
   }
 
   const rate = snapshot.ratesToUsd[fromCode] / snapshot.ratesToUsd[toCode];
-  const receiveAmount = money.round(amountAfterFee * rate);
+  const convertedAmount = amountAfterFee * rate;
+  // A safe source amount can exceed safe cent arithmetic after FX conversion.
+  // Reject before rounding, assigning an identity, or storing the quote.
+  if (!money.isSafeAmount(convertedAmount)) {
+    throw ApiError.badRequest('receive amount is outside the supported numeric range');
+  }
+  const receiveAmount = money.round(convertedAmount);
   quoteVersionSeq += 1;
 
   const quote = {
