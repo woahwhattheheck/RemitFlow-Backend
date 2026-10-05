@@ -27,6 +27,12 @@ const cache = new Map();
 /** @type {Set<string>} keys currently being refreshed */
 const inflight = new Set();
 
+// Singleflight alone does not stop sequential requests from retrying an outage.
+// Keep at most two failure records: freshness rejection under reject_stale must
+// not suppress a provider response that allow_stale could accept for display.
+const RETRY_COOLDOWN_MS = 1_000;
+const failedRefreshes = new Map();
+
 /** Counter for tests: how many times providers were actually invoked. */
 let providerFetchCount = 0;
 
@@ -133,6 +139,7 @@ function getSnapshot(opts = {}) {
   const readNow = opts.now != null ? () => opts.now : () => Date.now();
   const now = readNow();
   const policy = opts.policy || 'reject_stale';
+  const failureKey = policy === 'allow_stale' ? 'allow_stale' : 'reject_stale';
   const entry = cache.get(CACHE_KEY);
 
   if (entry) {
@@ -152,14 +159,39 @@ function getSnapshot(opts = {}) {
     });
   }
 
+  const failure = failedRefreshes.get(failureKey);
+  // A backward clock jump must not turn a one-second cooldown into a long hold.
+  if (failure && now >= failure.failedAt && now < failure.retryAt) {
+    if (entry && classify(entry, now) === 'stale' && policy === 'allow_stale') {
+      return decorate(entry, now, { cacheHit: true, source: 'cache-stale-outage' });
+    }
+    throw ApiError.serviceUnavailable('All FX providers failed', {
+      code: 'FX_PROVIDERS_DOWN',
+      attempted: failure.attempted.map((attempt) => ({ ...attempt })),
+      retryAfterMs: failure.retryAt - now,
+    });
+  }
+
   inflight.add(CACHE_KEY);
   try {
-    return refresh(readNow, policy);
+    const snapshot = refresh(readNow, policy);
+    if (snapshot.status === 'fresh') failedRefreshes.clear();
+    else failedRefreshes.delete(failureKey);
+    return snapshot;
   } catch (err) {
     // Provider path failed. Under allow_stale, a within-grace entry is still
     // usable for display — but it is visibly stale. Under reject_stale we
     // never price with it.
     const failedAt = readNow();
+    if (err instanceof ApiError && err.statusCode === 503 &&
+        err.details && err.details.code === 'FX_PROVIDERS_DOWN') {
+      failedRefreshes.set(failureKey, {
+        failedAt,
+        retryAt: failedAt + RETRY_COOLDOWN_MS,
+        // Keep only the provider layer's redacted diagnostics, not its Error.
+        attempted: err.details.attempted.map((attempt) => ({ ...attempt })),
+      });
+    }
     if (entry && classify(entry, failedAt) === 'stale' && policy === 'allow_stale') {
       return decorate(entry, failedAt, { cacheHit: true, source: 'cache-stale-outage' });
     }
@@ -179,10 +211,11 @@ function peek(now = Date.now()) {
   return decorate(entry, now, { cacheHit: true, source: 'peek' });
 }
 
-/** Drop cache and inflight state. */
+/** Drop cache, inflight state, and retry cooldowns. */
 function reset() {
   cache.clear();
   inflight.clear();
+  failedRefreshes.clear();
   providerFetchCount = 0;
 }
 
